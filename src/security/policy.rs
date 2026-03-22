@@ -668,7 +668,7 @@ impl SecurityPolicy {
     pub fn command_risk_level(&self, command: &str) -> CommandRiskLevel {
         let mut saw_medium = false;
 
-        for segment in split_unquoted_segments(command) {
+        for segment in self.non_comment_segments(command) {
             let cmd_part = skip_env_assignments(&segment);
             let mut words = cmd_part.split_whitespace();
             let Some(base_raw) = words.next() else {
@@ -836,6 +836,19 @@ impl SecurityPolicy {
         Ok(risk)
     }
 
+    /// Returns unquoted segments that are NOT comments (i.e. not starting with `#`).
+    /// Skips leading environment assignments when checking if it's a comment.
+    fn non_comment_segments(&self, command: &str) -> Vec<String> {
+        split_unquoted_segments(command)
+            .into_iter()
+            .filter(|segment| {
+                let cmd_part = skip_env_assignments(segment);
+                let executable = cmd_part.split_whitespace().next().unwrap_or("");
+                !executable.starts_with('#') && !executable.is_empty()
+            })
+            .collect()
+    }
+
     /// Check whether **every** segment of a command is explicitly listed in
     /// `allowed_commands` — i.e., matched by a concrete entry rather than by
     /// the wildcard `"*"`.
@@ -845,11 +858,12 @@ impl SecurityPolicy {
     /// does **not** qualify as an explicit allowlist match, so that operators
     /// who set `allowed_commands = ["*"]` still get the high-risk safety net.
     fn is_command_explicitly_allowed(&self, command: &str) -> bool {
-        let segments = split_unquoted_segments(command);
+        let segments = self.non_comment_segments(command);
         for segment in &segments {
             let cmd_part = skip_env_assignments(segment);
             let mut words = cmd_part.split_whitespace();
             let executable = strip_wrapping_quotes(words.next().unwrap_or("")).trim();
+
             let base_cmd_owned = command_basename(executable).to_ascii_lowercase();
             let base_cmd = strip_windows_exe_suffix(&base_cmd_owned);
 
@@ -872,10 +886,7 @@ impl SecurityPolicy {
         }
 
         // At least one real command must be present.
-        segments.iter().any(|s| {
-            let s = skip_env_assignments(s.trim());
-            s.split_whitespace().next().is_some_and(|w| !w.is_empty())
-        })
+        !segments.is_empty()
     }
 
     // ── Layered Command Allowlist ──────────────────────────────────────────
@@ -933,13 +944,19 @@ impl SecurityPolicy {
         }
 
         // Split on unquoted command separators and validate each sub-command.
-        let segments = split_unquoted_segments(command);
+        let segments = self.non_comment_segments(command);
+        if segments.is_empty() {
+            // Allow if it contains at least one segment (which must be a comment since segments is empty)
+            return !split_unquoted_segments(command).is_empty();
+        }
+
         for segment in &segments {
             // Strip leading env var assignments (e.g. FOO=bar cmd)
             let cmd_part = skip_env_assignments(segment);
 
             let mut words = cmd_part.split_whitespace();
             let executable = strip_wrapping_quotes(words.next().unwrap_or("")).trim();
+
             let base_cmd_owned = command_basename(executable).to_ascii_lowercase();
             let base_cmd = strip_windows_exe_suffix(&base_cmd_owned);
 
@@ -963,12 +980,7 @@ impl SecurityPolicy {
         }
 
         // At least one command must be present
-        let has_cmd = segments.iter().any(|s| {
-            let s = skip_env_assignments(s.trim());
-            s.split_whitespace().next().is_some_and(|w| !w.is_empty())
-        });
-
-        has_cmd
+        !segments.is_empty()
     }
 
     /// Check for dangerous arguments that allow sub-command execution.
@@ -1011,7 +1023,7 @@ impl SecurityPolicy {
             }
         };
 
-        for segment in split_unquoted_segments(command) {
+        for segment in self.non_comment_segments(command) {
             let cmd_part = skip_env_assignments(&segment);
             let mut words = cmd_part.split_whitespace();
             let Some(executable) = words.next() else {
@@ -2743,5 +2755,71 @@ mod tests {
             ..SecurityPolicy::default()
         };
         assert!(!p.is_under_allowed_root("/any/path"));
+    }
+
+    #[test]
+    fn test_command_with_single_comment_allowed() {
+        let p = SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            allowed_commands: vec!["ls".into()],
+            workspace_dir: PathBuf::from("."),
+            ..SecurityPolicy::default()
+        };
+
+        // A command with a comment line followed by an allowed command
+        let command = "# some comment\nls";
+        
+        // This currently fails because "#" is not in allowed_commands
+        assert!(p.is_command_allowed(command), "Command with comment should be allowed");
+    }
+
+    #[test]
+    fn test_command_with_multiple_comments_allowed() {
+        let p = SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            allowed_commands: vec!["ls".into()],
+            workspace_dir: PathBuf::from("."),
+            ..SecurityPolicy::default()
+        };
+
+        let command = "# comment 1\n# comment 2\nls";
+        assert!(p.is_command_allowed(command), "Command with multiple comments should be allowed");
+    }
+
+    #[test]
+    fn test_only_comment_allowed() {
+        let p = SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            allowed_commands: vec!["ls".into()],
+            workspace_dir: PathBuf::from("."),
+            ..SecurityPolicy::default()
+        };
+
+        let command = "# just a comment";
+        assert!(p.is_command_allowed(command), "Only comment should be allowed");
+    }
+
+    #[test]
+    fn test_forbidden_path_argument_skips_comments() {
+        let p = SecurityPolicy {
+            workspace_dir: PathBuf::from("."),
+            workspace_only: true,
+            ..SecurityPolicy::default()
+        };
+
+        // A comment containing a forbidden path should NOT be flagged
+        let command = "# refer to /etc/shadow\nls";
+        assert_eq!(p.forbidden_path_argument(command), None);
+    }
+
+    #[test]
+    fn test_is_command_explicitly_allowed_skips_comments() {
+        let p = SecurityPolicy {
+            allowed_commands: vec!["ls".into()],
+            ..SecurityPolicy::default()
+        };
+
+        let command = "# comment\nls";
+        assert!(p.is_command_explicitly_allowed(command));
     }
 }

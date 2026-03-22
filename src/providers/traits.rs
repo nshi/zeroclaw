@@ -466,6 +466,8 @@ pub fn build_tool_instructions_text(tools: &[ToolSpec]) -> String {
     instructions.push_str("<tool_call>\n");
     instructions.push_str(r#"{"name": "tool_name", "arguments": {"param": "value"}}"#);
     instructions.push_str("\n</tool_call>\n\n");
+    instructions.push_str(crate::agent::prompt::TOOL_CALL_INSTRUCTIONS);
+    instructions.push_str(" ");
     instructions.push_str("You may use multiple tool calls in a single response. ");
     instructions.push_str("After tool execution, results appear in <tool_result> tags. ");
     instructions

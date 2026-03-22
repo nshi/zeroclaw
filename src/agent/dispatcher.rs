@@ -136,6 +136,9 @@ impl ToolDispatcher for XmlToolDispatcher {
         instructions.push_str(
             "```\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n</tool_call>\n```\n\n",
         );
+        instructions.push_str("**CRITICAL**: ");
+        instructions.push_str(crate::agent::prompt::TOOL_CALL_INSTRUCTIONS);
+        instructions.push_str("\n\n");
         instructions.push_str("### Available Tools\n\n");
 
         for tool in tools {

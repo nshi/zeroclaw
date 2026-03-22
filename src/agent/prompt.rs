@@ -9,6 +9,9 @@ use std::path::Path;
 
 const BOOTSTRAP_MAX_CHARS: usize = 20_000;
 
+pub const TOOL_CALL_INSTRUCTIONS: &str =
+    "Provide ONLY the JSON object inside <tool_call> tags. Do NOT include comments, explanations, or any other text inside the tags. Comments are a waste of context.";
+
 pub struct PromptContext<'a> {
     pub workspace_dir: &'a Path,
     pub model_name: &'a str,
@@ -150,9 +153,20 @@ impl PromptSection for SafetySection {
     }
 
     fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
-        Ok("## Safety\n\n- Do not exfiltrate private data.\n- Do not run destructive commands without asking.\n- Do not bypass oversight or approval mechanisms.\n- Prefer `trash` over `rm`.\n- When in doubt, ask before acting externally.".into())
+        Ok(format!(
+            "## Safety\n\n\
+            - Do not exfiltrate private data.\n\
+            - Do not run destructive commands without asking.\n\
+            - Do not bypass oversight or approval mechanisms.\n\
+            - Prefer `trash` over `rm`.\n\
+            - When in doubt, ask before acting externally.\n\n\
+            ## Efficiency\n\n\
+            - **Tool Calls**: {}" ,
+            TOOL_CALL_INSTRUCTIONS
+        ))
     }
 }
+
 
 impl PromptSection for SkillsSection {
     fn name(&self) -> &str {

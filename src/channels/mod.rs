@@ -497,28 +497,32 @@ fn strip_tool_call_tags(message: &str) -> String {
     result.trim().to_string()
 }
 
-fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
+fn channel_delivery_instructions(channel_name: &str) -> Option<String> {
     match channel_name {
         "matrix" => Some(
             "When responding on Matrix:\n\
              - Use Markdown formatting (bold, italic, code blocks)\n\
              - Be concise and direct\n\
              - When you receive a [Voice message], the user spoke to you. Respond naturally as in conversation.\n\
-             - Your text reply will automatically be converted to audio and sent back as a voice message.\n",
+             - Your text reply will automatically be converted to audio and sent back as a voice message.\n".to_string(),
         ),
         "telegram" => Some(
-            "When responding on Telegram:\n\
-             - Include media markers for files or URLs that should be sent as attachments\n\
-             - Use **bold** for key terms, section titles, and important info (renders as <b>)\n\
-             - Use *italic* for emphasis (renders as <i>)\n\
-             - Use `backticks` for inline code, commands, or technical terms\n\
-             - Use triple backticks for code blocks\n\
-             - Use emoji naturally to add personality — but don't overdo it\n\
-             - Be concise and direct. Skip filler phrases like 'Great question!' or 'Certainly!'\n\
-             - Structure longer answers with bold headers, not raw markdown ## headers\n\
-             - For media attachments use markers: [IMAGE:<path-or-url>], [DOCUMENT:<path-or-url>], [VIDEO:<path-or-url>], [AUDIO:<path-or-url>], or [VOICE:<path-or-url>]\n\
-             - Keep normal text outside markers and never wrap markers in code fences.\n\
-             - Use tool results silently: answer the latest user message directly, and do not narrate delayed/internal tool execution bookkeeping.",
+            format!(
+                "When responding on Telegram:\n\
+                 - Include media markers for files or URLs that should be sent as attachments\n\
+                 - Use **bold** for key terms, section titles, and important info (renders as <b>)\n\
+                 - Use *italic* for emphasis (renders as <i>)\n\
+                 - Use `backticks` for inline code, commands, or technical terms\n\
+                 - Use triple backticks for code blocks\n\
+                 - Use emoji naturally to add personality — but don't overdo it\n\
+                 - Be concise and direct. Skip filler phrases like 'Great question!' or 'Certainly!'\n\
+                 - Structure longer answers with bold headers, not raw markdown ## headers\n\
+                 - For media attachments use markers: [IMAGE:<path-or-url>], [DOCUMENT:<path-or-url>], [VIDEO:<path-or-url>], [AUDIO:<path-or-url>], or [VOICE:<path-or-url>]\n\
+                 - Keep normal text outside markers and never wrap markers in code fences.\n\
+                 - **Tool Calls**: {}\n\
+                 - Use tool results silently: answer the latest user message directly, and do not narrate delayed/internal tool execution bookkeeping.",
+                 crate::agent::prompt::TOOL_CALL_INSTRUCTIONS
+            )
         ),
         _ => None,
     }
@@ -2715,12 +2719,16 @@ pub fn build_system_prompt_with_mode(
 
     // ── 2. Safety ───────────────────────────────────────────────
     prompt.push_str("## Safety\n\n");
-    prompt.push_str(
+    let _ = write!(
+        prompt,
         "- Do not exfiltrate private data.\n\
          - Do not run destructive commands without asking.\n\
          - Do not bypass oversight or approval mechanisms.\n\
          - Prefer `trash` over `rm` (recoverable beats gone forever).\n\
-         - When in doubt, ask before acting externally.\n\n",
+         - When in doubt, ask before acting externally.\n\n\
+         ## Efficiency\n\n\
+         - **Tool Calls**: {}\n\n",
+         crate::agent::prompt::TOOL_CALL_INSTRUCTIONS
     );
 
     // ── 3. Skills (full or compact, based on config) ─────────────
