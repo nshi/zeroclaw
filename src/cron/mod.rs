@@ -275,10 +275,16 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             expression,
             tz,
             command,
+            prompt,
             name,
         } => {
-            if expression.is_none() && tz.is_none() && command.is_none() && name.is_none() {
-                bail!("At least one of --expression, --tz, --command, or --name must be provided");
+            if expression.is_none()
+                && tz.is_none()
+                && command.is_none()
+                && name.is_none()
+                && prompt.is_none()
+            {
+                bail!("At least one of --expression, --tz, --command, --prompt, or --name must be provided");
             }
 
             // Merge expression/tz with the existing schedule so that
@@ -304,6 +310,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             let patch = CronJobPatch {
                 schedule,
                 command,
+                prompt,
                 name,
                 ..CronJobPatch::default()
             };
@@ -312,7 +319,11 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             println!("\u{2705} Updated cron job {}", job.id);
             println!("  Expr: {}", job.expression);
             println!("  Next: {}", job.next_run.to_rfc3339());
-            println!("  Cmd : {}", job.command);
+            if job.job_type == JobType::Shell {
+                println!("  Cmd : {}", job.command);
+            } else {
+                println!("  Prompt: {}", job.prompt.as_deref().unwrap_or_default());
+            }
             Ok(())
         }
         crate::CronCommands::Remove { id } => remove_job(config, &id),
@@ -418,6 +429,7 @@ mod tests {
         expression: Option<&str>,
         tz: Option<&str>,
         command: Option<&str>,
+        prompt: Option<&str>,
         name: Option<&str>,
     ) -> Result<()> {
         handle_command(
@@ -426,6 +438,7 @@ mod tests {
                 expression: expression.map(Into::into),
                 tz: tz.map(Into::into),
                 command: command.map(Into::into),
+                prompt: prompt.map(Into::into),
                 name: name.map(Into::into),
             },
             config,
@@ -438,11 +451,54 @@ mod tests {
         let config = test_config(&tmp);
         let job = make_job(&config, "*/5 * * * *", None, "echo original");
 
-        run_update(&config, &job.id, None, None, Some("echo updated"), None).unwrap();
+        run_update(
+            &config,
+            &job.id,
+            None,
+            None,
+            Some("echo updated"),
+            None,
+            None,
+        )
+        .unwrap();
 
         let updated = get_job(&config, &job.id).unwrap();
         assert_eq!(updated.command, "echo updated");
         assert_eq!(updated.id, job.id);
+    }
+
+    #[test]
+    fn update_changes_prompt_via_handler() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let job = add_agent_job(
+            &config,
+            None,
+            Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "original prompt",
+            SessionTarget::Isolated,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        run_update(
+            &config,
+            &job.id,
+            None,
+            None,
+            None,
+            Some("updated prompt"),
+            None,
+        )
+        .unwrap();
+
+        let updated = get_job(&config, &job.id).unwrap();
+        assert_eq!(updated.prompt.as_deref(), Some("updated prompt"));
     }
 
     #[test]
@@ -451,7 +507,16 @@ mod tests {
         let config = test_config(&tmp);
         let job = make_job(&config, "*/5 * * * *", None, "echo test");
 
-        run_update(&config, &job.id, Some("0 9 * * *"), None, None, None).unwrap();
+        run_update(
+            &config,
+            &job.id,
+            Some("0 9 * * *"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let updated = get_job(&config, &job.id).unwrap();
         assert_eq!(updated.expression, "0 9 * * *");
@@ -463,7 +528,16 @@ mod tests {
         let config = test_config(&tmp);
         let job = make_job(&config, "*/5 * * * *", None, "echo test");
 
-        run_update(&config, &job.id, None, None, None, Some("new-name")).unwrap();
+        run_update(
+            &config,
+            &job.id,
+            None,
+            None,
+            None,
+            None,
+            Some("new-name"),
+        )
+        .unwrap();
 
         let updated = get_job(&config, &job.id).unwrap();
         assert_eq!(updated.name.as_deref(), Some("new-name"));
@@ -480,6 +554,7 @@ mod tests {
             &job.id,
             None,
             Some("America/Los_Angeles"),
+            None,
             None,
             None,
         )
@@ -506,7 +581,16 @@ mod tests {
             "echo test",
         );
 
-        run_update(&config, &job.id, Some("0 9 * * *"), None, None, None).unwrap();
+        run_update(
+            &config,
+            &job.id,
+            Some("0 9 * * *"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let updated = get_job(&config, &job.id).unwrap();
         assert_eq!(
@@ -533,7 +617,16 @@ mod tests {
         )
         .unwrap();
 
-        run_update(&config, &job.id, None, None, Some("echo changed"), None).unwrap();
+        run_update(
+            &config,
+            &job.id,
+            None,
+            None,
+            Some("echo changed"),
+            None,
+            None,
+        )
+        .unwrap();
 
         let updated = get_job(&config, &job.id).unwrap();
         assert_eq!(updated.command, "echo changed");
@@ -547,7 +640,7 @@ mod tests {
         let config = test_config(&tmp);
         let job = make_job(&config, "*/5 * * * *", None, "echo test");
 
-        let result = run_update(&config, &job.id, None, None, None, None);
+        let result = run_update(&config, &job.id, None, None, None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("At least one of"));
     }
@@ -560,6 +653,7 @@ mod tests {
         let result = run_update(
             &config,
             "nonexistent-id",
+            None,
             None,
             None,
             Some("echo test"),
@@ -659,6 +753,7 @@ mod tests {
             None,
             None,
             Some("touch cron-cli-medium-risk"),
+            None,
             None,
         );
         assert!(result.is_err());

@@ -379,6 +379,9 @@ Examples:
         /// New command to run
         #[arg(long)]
         command: Option<String>,
+        /// New prompt (for agent jobs)
+        #[arg(long)]
+        prompt: Option<String>,
         /// New job name
         #[arg(long)]
         name: Option<String>,

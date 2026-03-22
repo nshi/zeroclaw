@@ -61,8 +61,33 @@ impl Tool for CronUpdateTool {
         json!({
             "type": "object",
             "properties": {
-                "job_id": { "type": "string" },
-                "patch": { "type": "object" },
+                "job_id": { "type": "string", "description": "ID of the cron job to update" },
+                "patch": {
+                    "type": "object",
+                    "description": "Fields to update in the cron job",
+                    "properties": {
+                        "schedule": {
+                            "type": "object",
+                            "description": "New schedule: {kind:'cron',expr,tz?} | {kind:'at',at} | {kind:'every',every_ms}"
+                        },
+                        "command": { "type": "string", "description": "New shell command (for shell jobs)" },
+                        "prompt": { "type": "string", "description": "New agent prompt (for agent jobs)" },
+                        "name": { "type": "string", "description": "New job name" },
+                        "enabled": { "type": "boolean", "description": "Enable or disable the job" },
+                        "model": { "type": "string", "description": "New model name (for agent jobs)" },
+                        "session_target": { "type": "string", "enum": ["isolated", "main"] },
+                        "delete_after_run": { "type": "boolean" },
+                        "delivery": {
+                            "type": "object",
+                            "properties": {
+                                "mode": { "type": "string", "enum": ["none", "announce"] },
+                                "channel": { "type": "string", "enum": ["telegram", "discord", "slack", "mattermost", "matrix"] },
+                                "to": { "type": "string" },
+                                "best_effort": { "type": "boolean" }
+                            }
+                        }
+                    }
+                },
                 "approved": {
                     "type": "boolean",
                     "description": "Set true to explicitly approve medium/high-risk shell commands in supervised mode",
@@ -181,6 +206,39 @@ mod tests {
 
         assert!(result.success, "{:?}", result.error);
         assert!(result.output.contains("\"enabled\": false"));
+    }
+
+    #[tokio::test]
+    async fn updates_prompt_of_agent_job() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_config(&tmp).await;
+        let job = cron::add_agent_job(
+            &cfg,
+            Some("agent-job".into()),
+            cron::Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "original prompt",
+            cron::SessionTarget::Isolated,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let tool = CronUpdateTool::new(cfg.clone(), test_security(&cfg));
+
+        let result = tool
+            .execute(json!({
+                "job_id": job.id,
+                "patch": { "prompt": "updated prompt" }
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        let updated = cron::get_job(&cfg, &job.id).unwrap();
+        assert_eq!(updated.prompt.as_deref(), Some("updated prompt"));
     }
 
     #[tokio::test]
