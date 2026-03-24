@@ -48,19 +48,32 @@ impl XmlToolDispatcher {
                 let inner = &remaining[start + 11..start + end];
                 match serde_json::from_str::<Value>(inner.trim()) {
                     Ok(parsed) => {
-                        let name = parsed
+                        let mut name = parsed
                             .get("name")
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_string();
-                        if name.is_empty() {
-                            remaining = &remaining[start + end + 12..];
-                            continue;
-                        }
-                        let arguments = parsed
-                            .get("arguments")
-                            .cloned()
-                            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+                        let arguments = if name.is_empty() {
+                            // Fallback: Infer tool name from arguments if missing.
+                            if parsed.get("command").is_some() {
+                                name = "shell".to_string();
+                                parsed.clone()
+                            } else if parsed.get("path").is_some() && parsed.get("content").is_some()
+                            {
+                                name = "file_write".to_string();
+                                parsed.clone()
+                            } else {
+                                remaining = &remaining[start + end + 12..];
+                                continue;
+                            }
+                        } else {
+                            parsed
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
+                        };
+
                         calls.push(ParsedToolCall {
                             name,
                             arguments,
@@ -267,6 +280,24 @@ impl ToolDispatcher for NativeToolDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xml_dispatcher_handles_nameless_tool_call() {
+        let response = ChatResponse {
+            text: Some(
+                "Checking\n<tool_call>{\"command\":\"ls\"}</tool_call>"
+                    .into(),
+            ),
+            tool_calls: vec![],
+            usage: None,
+            reasoning_content: None,
+        };
+        let dispatcher = XmlToolDispatcher;
+        let (_, calls) = dispatcher.parse_response(&response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(calls[0].arguments.get("command").unwrap().as_str().unwrap(), "ls");
+    }
 
     #[test]
     fn xml_dispatcher_parses_tool_calls() {

@@ -569,6 +569,23 @@ fn parse_tool_call_value(value: &serde_json::Value) -> Option<ParsedToolCall> {
         .to_string();
 
     if name.is_empty() {
+        // Fallback: Infer tool name from arguments if missing.
+        // Some models (especially via OpenRouter) output the arguments
+        // directly in a <tool_call> tag without a "name" field.
+        if value.get("command").is_some() {
+            return Some(ParsedToolCall {
+                name: "shell".to_string(),
+                arguments: value.clone(),
+                tool_call_id,
+            });
+        }
+        if value.get("path").is_some() && value.get("content").is_some() {
+            return Some(ParsedToolCall {
+                name: "file_write".to_string(),
+                arguments: value.clone(),
+                tool_call_id,
+            });
+        }
         return None;
     }
 
@@ -4762,6 +4779,21 @@ mod tests {
     fn resolve_display_text_uses_response_text_for_final_turns() {
         let display = resolve_display_text("Final answer", "", false);
         assert_eq!(display, "Final answer");
+    }
+
+    #[test]
+    fn parse_tool_calls_handles_nameless_shell_call() {
+        let response = r#"<tool_call>
+{"command": "ls -la"}
+</tool_call>"#;
+
+        let (_, calls) = parse_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments.get("command").unwrap().as_str().unwrap(),
+            "ls -la"
+        );
     }
 
     #[test]
