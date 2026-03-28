@@ -5,6 +5,7 @@
 //! one-per-line as JSON, never modifying old lines. On daemon restart, sessions
 //! are loaded from disk to restore conversation context.
 
+use crate::channels::session_backend::SessionBackend;
 use crate::providers::traits::ChatMessage;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -78,6 +79,47 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Remove the last message from a session's JSONL file.
+    ///
+    /// Rewrite approach: load all messages, drop the last, rewrite. This is
+    /// O(n) but rollbacks are rare.
+    pub fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {
+        let mut messages = self.load(session_key);
+        if messages.is_empty() {
+            return Ok(false);
+        }
+        messages.pop();
+        self.rewrite(session_key, &messages)?;
+        Ok(true)
+    }
+
+    /// Compact a session file by rewriting only valid messages (removes corrupt lines).
+    pub fn compact(&self, session_key: &str) -> std::io::Result<()> {
+        let messages = self.load(session_key);
+        self.rewrite(session_key, &messages)
+    }
+
+    fn rewrite(&self, session_key: &str, messages: &[ChatMessage]) -> std::io::Result<()> {
+        let path = self.session_path(session_key);
+        let mut file = std::fs::File::create(&path)?;
+        for msg in messages {
+            let json = serde_json::to_string(msg)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            writeln!(file, "{json}")?;
+        }
+        Ok(())
+    }
+
+    /// Delete a session's JSONL file. Returns `true` if the file existed.
+    pub fn delete_session(&self, session_key: &str) -> std::io::Result<bool> {
+        let path = self.session_path(session_key);
+        if !path.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_file(&path)?;
+        Ok(true)
+    }
+
     /// List all session keys that have files on disk.
     pub fn list_sessions(&self) -> Vec<String> {
         let entries = match std::fs::read_dir(&self.sessions_dir) {
@@ -92,6 +134,32 @@ impl SessionStore {
                 name.strip_suffix(".jsonl").map(String::from)
             })
             .collect()
+    }
+}
+
+impl SessionBackend for SessionStore {
+    fn load(&self, session_key: &str) -> Vec<ChatMessage> {
+        self.load(session_key)
+    }
+
+    fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()> {
+        self.append(session_key, message)
+    }
+
+    fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {
+        self.remove_last(session_key)
+    }
+
+    fn list_sessions(&self) -> Vec<String> {
+        self.list_sessions()
+    }
+
+    fn compact(&self, session_key: &str) -> std::io::Result<()> {
+        self.compact(session_key)
+    }
+
+    fn delete_session(&self, session_key: &str) -> std::io::Result<bool> {
+        self.delete_session(session_key)
     }
 }
 
@@ -179,6 +247,63 @@ mod tests {
     }
 
     #[test]
+    fn remove_last_drops_final_message() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(tmp.path()).unwrap();
+
+        store
+            .append("rm_test", &ChatMessage::user("first"))
+            .unwrap();
+        store
+            .append("rm_test", &ChatMessage::user("second"))
+            .unwrap();
+
+        assert!(store.remove_last("rm_test").unwrap());
+        let messages = store.load("rm_test");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "first");
+    }
+
+    #[test]
+    fn remove_last_empty_returns_false() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(tmp.path()).unwrap();
+        assert!(!store.remove_last("nonexistent").unwrap());
+    }
+
+    #[test]
+    fn compact_removes_corrupt_lines() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(tmp.path()).unwrap();
+        let key = "compact_test";
+
+        let path = store.session_path(key);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, r#"{{"role":"user","content":"ok"}}"#).unwrap();
+        writeln!(file, "corrupt line").unwrap();
+        writeln!(file, r#"{{"role":"assistant","content":"hi"}}"#).unwrap();
+
+        store.compact(key).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(raw.trim().lines().count(), 2);
+    }
+
+    #[test]
+    fn session_backend_trait_works_via_dyn() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(tmp.path()).unwrap();
+        let backend: &dyn SessionBackend = &store;
+
+        backend
+            .append("trait_test", &ChatMessage::user("hello"))
+            .unwrap();
+        let msgs = backend.load("trait_test");
+        assert_eq!(msgs.len(), 1);
+    }
+
+    #[test]
     fn handles_corrupt_lines_gracefully() {
         let tmp = TempDir::new().unwrap();
         let store = SessionStore::new(tmp.path()).unwrap();
@@ -196,5 +321,45 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "hello");
         assert_eq!(messages[1].content, "world");
+    }
+
+    #[test]
+    fn delete_session_removes_jsonl_file() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(tmp.path()).unwrap();
+        let key = "delete_test";
+
+        store.append(key, &ChatMessage::user("hello")).unwrap();
+        assert_eq!(store.load(key).len(), 1);
+
+        let deleted = store.delete_session(key).unwrap();
+        assert!(deleted);
+        assert!(store.load(key).is_empty());
+        assert!(!store.session_path(key).exists());
+    }
+
+    #[test]
+    fn delete_session_nonexistent_returns_false() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(tmp.path()).unwrap();
+
+        let deleted = store.delete_session("nonexistent").unwrap();
+        assert!(!deleted);
+    }
+
+    #[test]
+    fn delete_session_via_trait() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(tmp.path()).unwrap();
+        let backend: &dyn SessionBackend = &store;
+
+        backend
+            .append("trait_delete", &ChatMessage::user("hello"))
+            .unwrap();
+        assert_eq!(backend.load("trait_delete").len(), 1);
+
+        let deleted = backend.delete_session("trait_delete").unwrap();
+        assert!(deleted);
+        assert!(backend.load("trait_delete").is_empty());
     }
 }
