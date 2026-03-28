@@ -5250,6 +5250,10 @@ pub async fn start_channels(config: Config) -> Result<()> {
             "Load the full source for an available skill by name. Use when: compact mode only shows a summary and you need the complete skill instructions.",
         ));
     }
+    tool_descs.push((
+        "use_skill",
+        "Invoke a skill by name. BLOCKING REQUIREMENT: when the user's request matches a skill description in <available_skills> or the user mentions a skill by name, invoke use_skill BEFORE generating any other response. Don't use when: no available skill matches the user's intent.",
+    ));
 
     if config.browser.enabled {
         tool_descs.push((
