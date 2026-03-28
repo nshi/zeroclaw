@@ -105,6 +105,7 @@ pub mod swarm;
 pub mod text_browser;
 pub mod tool_search;
 pub mod traits;
+pub mod use_skill;
 pub mod verifiable_intent;
 pub mod weather_tool;
 pub mod web_fetch;
@@ -205,6 +206,7 @@ pub use tool_search::ToolSearchTool;
 pub use traits::Tool;
 #[allow(unused_imports)]
 pub use traits::{ToolResult, ToolSpec};
+pub use use_skill::UseSkillTool;
 pub use verifiable_intent::VerifiableIntentTool;
 pub use weather_tool::WeatherTool;
 pub use web_fetch::WebFetchTool;
@@ -502,6 +504,14 @@ pub fn all_tools_with_runtime(
             root_config.skills.open_skills_dir.clone(),
         )));
     }
+
+    // use_skill works in both Full and Compact modes.
+    tool_arcs.push(Arc::new(UseSkillTool::new(
+        workspace_dir.to_path_buf(),
+        root_config.skills.open_skills_enabled,
+        root_config.skills.open_skills_dir.clone(),
+        root_config.skills.prompt_injection_mode,
+    )));
 
     if browser_config.enabled {
         // Add legacy browser_open tool for simple URL opening

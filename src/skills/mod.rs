@@ -680,7 +680,7 @@ fn parse_simple_frontmatter(s: &str) -> SkillMarkdownMeta {
     meta
 }
 
-fn split_skill_frontmatter(content: &str) -> Option<(String, String)> {
+pub(crate) fn split_skill_frontmatter(content: &str) -> Option<(String, String)> {
     let normalized = content.replace("\r\n", "\n");
     let rest = normalized.strip_prefix("---\n")?;
     if let Some(idx) = rest.find("\n---\n") {
@@ -775,16 +775,22 @@ pub fn skills_to_prompt_with_mode(
              Skill instructions and tool metadata are preloaded below.\n\
              Follow these instructions directly; do not read skill files at runtime unless the user asks. \
              Never make up a script name; you must always follow the instructions and tool definitions provided within the skill file.\n\
-             CRITICAL RULE: Relative skill script paths in the SKILL.md are relative to the skill root. The shell command MUST always first `cd` into the skill's `location` before executing any shell commands from the skill instructions.\n\n\
+             CRITICAL RULE: Relative skill script paths in the SKILL.md are relative to the skill root. The shell command MUST always first `cd` into the skill's `location` before executing any shell commands from the skill instructions.\n\
+             Each skill's <description> defines when to use it. \
+             When the user's request matches a skill description — including when they mention a skill by name or use a slash command — \
+             you MUST call `use_skill` with that skill's name BEFORE generating any other response.\n\n\
              <available_skills>\n",
         ),
         crate::config::SkillsPromptInjectionMode::Compact => String::from(
             "## Available Skills\n\n\
              Skill summaries are preloaded below to keep context compact.\n\
-             Skill instructions are loaded on demand: call `read_skill(name)` with the skill's `<name>` when you need the full skill file.\n\
+             Skill instructions are loaded on demand via `use_skill(name)`.\n\
              The `location` field is included for reference. \
              Never make up a script name; you must always follow the instructions and tool definitions provided within the skill file.\n\
-             CRITICAL RULE: Relative skill script paths in the SKILL.md are relative to the skill root. The shell command MUST always first `cd` into the skill's `location` before executing any shell commands from the skill instructions.\n\n\
+             CRITICAL RULE: Relative skill script paths in the SKILL.md are relative to the skill root. The shell command MUST always first `cd` into the skill's `location` before executing any shell commands from the skill instructions.\n\
+             Each skill's <description> defines when to use it. \
+             When the user's request matches a skill description — including when they mention a skill by name or use a slash command — \
+             you MUST call `use_skill` with that skill's name BEFORE generating any other response.\n\n\
              <available_skills>\n",
         ),
     };
@@ -1709,7 +1715,8 @@ command = "echo hello"
         assert!(prompt.contains("<name>test</name>"));
         assert!(prompt.contains("<location>skills/test/SKILL.md</location>"));
         assert!(prompt.contains("loaded on demand"));
-        assert!(prompt.contains("read_skill(name)"));
+        assert!(prompt.contains("use_skill(name)"));
+        assert!(!prompt.contains("read_skill"));
         assert!(!prompt.contains("<instructions>"));
         assert!(!prompt.contains("<instruction>Do the thing.</instruction>"));
         // Compact mode should still include tools so the LLM knows about them.

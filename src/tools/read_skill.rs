@@ -94,11 +94,21 @@ impl Tool for ReadSkillTool {
         };
 
         match tokio::fs::read_to_string(location).await {
-            Ok(output) => Ok(ToolResult {
-                success: true,
-                output,
-                error: None,
-            }),
+            Ok(raw) => {
+                // Strip YAML frontmatter from .md files so the LLM only sees instructions.
+                let output = if location.extension().is_some_and(|e| e == "md") {
+                    crate::skills::split_skill_frontmatter(&raw)
+                        .map(|(_fm, body)| body)
+                        .unwrap_or(raw)
+                } else {
+                    raw
+                };
+                Ok(ToolResult {
+                    success: true,
+                    output,
+                    error: None,
+                })
+            }
             Err(err) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -122,13 +132,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_markdown_skill_by_name() {
+    async fn reads_markdown_skill_by_name_strips_frontmatter() {
         let tmp = TempDir::new().unwrap();
         let skill_dir = tmp.path().join("workspace/skills/weather");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "# Weather\n\nUse this skill for forecast lookups.\n",
+            "---\nname: weather\ndescription: Forecast lookups\nversion: 1.0.0\n---\n\n# Weather\n\nUse this skill for forecast lookups.\n",
         )
         .unwrap();
 
@@ -140,6 +150,9 @@ mod tests {
         assert!(result.success);
         assert!(result.output.contains("# Weather"));
         assert!(result.output.contains("forecast lookups"));
+        // Frontmatter must be stripped.
+        assert!(!result.output.contains("---"));
+        assert!(!result.output.contains("version: 1.0.0"));
     }
 
     #[tokio::test]
