@@ -145,22 +145,16 @@ impl Tool for SkillShellTool {
             });
         }
 
-        // Build and execute the command from the skill's own directory so that
-        // relative paths in skill scripts resolve correctly.
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(&command);
         cmd.current_dir(&self.skill_dir);
         cmd.env_clear();
 
-        // Only pass safe environment variables
-        for var in &[
-            "PATH", "HOME", "TERM", "LANG", "LC_ALL", "USER", "SHELL", "TMPDIR",
-        ] {
-            if let Ok(val) = std::env::var(var) {
-                cmd.env(var, val);
+        for var in super::shell::collect_allowed_shell_env_vars(&self.security) {
+            if let Ok(val) = std::env::var(&var) {
+                cmd.env(&var, val);
             }
         }
-        // Expose the skill directory so scripts can reference it explicitly.
         cmd.env("SKILL_DIR", &self.skill_dir);
 
         let result =

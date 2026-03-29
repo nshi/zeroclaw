@@ -95,19 +95,9 @@ impl Tool for UseSkillTool {
             });
         };
 
-        // Derive the skill root directory so the LLM knows where to run
-        // shell commands. Fall back to the conventional location.
-        let skill_dir_display = skill
-            .location
-            .as_ref()
-            .and_then(|p| p.parent().map(|d| d.display().to_string()))
-            .unwrap_or_else(|| {
-                self.workspace_dir
-                    .join("skills")
-                    .join(&skill.name)
-                    .display()
-                    .to_string()
-            });
+        let skill_dir_display = crate::skills::resolve_skill_dir(skill, &self.workspace_dir)
+            .display()
+            .to_string();
 
         let output = match self.mode {
             crate::config::SkillsPromptInjectionMode::Full => {

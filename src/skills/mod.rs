@@ -730,7 +730,7 @@ fn write_xml_text_element(out: &mut String, indent: usize, tag: &str, value: &st
 }
 
 /// Resolve the skill's root directory (not the file).
-fn resolve_skill_dir(skill: &Skill, workspace_dir: &Path) -> PathBuf {
+pub(crate) fn resolve_skill_dir(skill: &Skill, workspace_dir: &Path) -> PathBuf {
     skill
         .location
         .as_ref()
@@ -889,12 +889,7 @@ pub fn skills_to_tools(
 ) -> Vec<Box<dyn crate::tools::traits::Tool>> {
     let mut tools: Vec<Box<dyn crate::tools::traits::Tool>> = Vec::new();
     for skill in skills {
-        let skill_dir = skill
-            .location
-            .as_ref()
-            .and_then(|p| p.parent())
-            .unwrap_or(&security.workspace_dir)
-            .to_path_buf();
+        let skill_dir = resolve_skill_dir(skill, &security.workspace_dir);
         for tool in &skill.tools {
             match tool.kind.as_str() {
                 "shell" | "script" => {
