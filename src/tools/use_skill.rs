@@ -95,6 +95,20 @@ impl Tool for UseSkillTool {
             });
         };
 
+        // Derive the skill root directory so the LLM knows where to run
+        // shell commands. Fall back to the conventional location.
+        let skill_dir_display = skill
+            .location
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.display().to_string()))
+            .unwrap_or_else(|| {
+                self.workspace_dir
+                    .join("skills")
+                    .join(&skill.name)
+                    .display()
+                    .to_string()
+            });
+
         let output = match self.mode {
             crate::config::SkillsPromptInjectionMode::Full => {
                 // In Full mode the instructions are already in the system prompt.
@@ -102,13 +116,14 @@ impl Tool for UseSkillTool {
                 // front-of-mind in the tool result.
                 if skill.prompts.is_empty() {
                     format!(
-                        "[Skill '{}' activated — no additional instructions.]\n",
-                        skill.name
+                        "[Skill '{}' activated. Skill directory: {}]\n",
+                        skill.name, skill_dir_display
                     )
                 } else {
                     format!(
-                        "[Skill '{}' activated. Instructions follow.]\n\n{}",
+                        "[Skill '{}' activated. Skill directory: {}]\n\n{}",
                         skill.name,
+                        skill_dir_display,
                         skill.prompts.join("\n\n")
                     )
                 }
@@ -143,8 +158,8 @@ impl Tool for UseSkillTool {
                 };
 
                 format!(
-                    "[Skill '{}' activated. Instructions follow.]\n\n{}",
-                    skill.name, body
+                    "[Skill '{}' activated. Skill directory: {}]\n\n{}",
+                    skill.name, skill_dir_display, body
                 )
             }
         };
@@ -182,6 +197,8 @@ mod tests {
 
         assert!(result.success);
         assert!(result.output.contains("[Skill 'deploy' activated"));
+        assert!(result.output.contains("Skill directory:"));
+        assert!(result.output.contains("skills/deploy"));
         assert!(result.output.contains("# Deploy"));
         assert!(result.output.contains("Run the deploy pipeline."));
     }
@@ -202,6 +219,8 @@ mod tests {
 
         assert!(result.success);
         assert!(result.output.contains("[Skill 'lint' activated"));
+        assert!(result.output.contains("Skill directory:"));
+        assert!(result.output.contains("skills/lint"));
         assert!(result.output.contains("# Lint"));
         assert!(result.output.contains("Run the linter."));
         // Frontmatter must not leak into output.
@@ -221,6 +240,7 @@ mod tests {
 
         assert!(result.success);
         assert!(result.output.contains("[Skill 'commit' activated"));
+        assert!(result.output.contains("Skill directory:"));
     }
 
     #[tokio::test]

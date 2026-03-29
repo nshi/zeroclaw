@@ -729,23 +729,23 @@ fn write_xml_text_element(out: &mut String, indent: usize, tag: &str, value: &st
     out.push_str(">\n");
 }
 
-fn resolve_skill_location(skill: &Skill, workspace_dir: &Path) -> PathBuf {
-    skill.location.clone().unwrap_or_else(|| {
-        workspace_dir
-            .join("skills")
-            .join(&skill.name)
-            .join("SKILL.md")
-    })
+/// Resolve the skill's root directory (not the file).
+fn resolve_skill_dir(skill: &Skill, workspace_dir: &Path) -> PathBuf {
+    skill
+        .location
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| workspace_dir.join("skills").join(&skill.name))
 }
 
 fn render_skill_location(skill: &Skill, workspace_dir: &Path, prefer_relative: bool) -> String {
-    let location = resolve_skill_location(skill, workspace_dir);
+    let dir = resolve_skill_dir(skill, workspace_dir);
     if prefer_relative {
-        if let Ok(relative) = location.strip_prefix(workspace_dir) {
+        if let Ok(relative) = dir.strip_prefix(workspace_dir) {
             return relative.display().to_string();
         }
     }
-    location.display().to_string()
+    dir.display().to_string()
 }
 
 /// Build the "Available Skills" system prompt section with full skill instructions.
@@ -775,7 +775,9 @@ pub fn skills_to_prompt_with_mode(
              Skill instructions and tool metadata are preloaded below.\n\
              Follow these instructions directly; do not read skill files at runtime unless the user asks. \
              Never make up a script name; you must always follow the instructions and tool definitions provided within the skill file.\n\
-             CRITICAL RULE: Relative skill script paths in the SKILL.md are relative to the skill root. The shell command MUST always first `cd` into the skill's `location` before executing any shell commands from the skill instructions.\n\
+             CRITICAL RULE: Each skill's <location> is its root directory. Relative script paths in the SKILL.md are relative to this directory. \
+             The shell command MUST always first `cd` into the skill's <location> directory before executing any shell commands from the skill instructions. \
+             Callable skill tools (listed in <callable_tools>) already run from the correct directory automatically.\n\
              Each skill's <description> defines when to use it. \
              When the user's request matches a skill description — including when they mention a skill by name or use a slash command — \
              you MUST call `use_skill` with that skill's name BEFORE generating any other response.\n\n\
@@ -785,9 +787,11 @@ pub fn skills_to_prompt_with_mode(
             "## Available Skills\n\n\
              Skill summaries are preloaded below to keep context compact.\n\
              Skill instructions are loaded on demand via `use_skill(name)`.\n\
-             The `location` field is included for reference. \
+             The `location` field is the skill's root directory. \
              Never make up a script name; you must always follow the instructions and tool definitions provided within the skill file.\n\
-             CRITICAL RULE: Relative skill script paths in the SKILL.md are relative to the skill root. The shell command MUST always first `cd` into the skill's `location` before executing any shell commands from the skill instructions.\n\
+             CRITICAL RULE: Each skill's <location> is its root directory. Relative script paths in the SKILL.md are relative to this directory. \
+             The shell command MUST always first `cd` into the skill's <location> directory before executing any shell commands from the skill instructions. \
+             Callable skill tools (listed in <callable_tools>) already run from the correct directory automatically.\n\
              Each skill's <description> defines when to use it. \
              When the user's request matches a skill description — including when they mention a skill by name or use a slash command — \
              you MUST call `use_skill` with that skill's name BEFORE generating any other response.\n\n\
@@ -885,12 +889,19 @@ pub fn skills_to_tools(
 ) -> Vec<Box<dyn crate::tools::traits::Tool>> {
     let mut tools: Vec<Box<dyn crate::tools::traits::Tool>> = Vec::new();
     for skill in skills {
+        let skill_dir = skill
+            .location
+            .as_ref()
+            .and_then(|p| p.parent())
+            .unwrap_or(&security.workspace_dir)
+            .to_path_buf();
         for tool in &skill.tools {
             match tool.kind.as_str() {
                 "shell" | "script" => {
                     tools.push(Box::new(crate::tools::skill_tool::SkillShellTool::new(
                         &skill.name,
                         tool,
+                        skill_dir.clone(),
                         security.clone(),
                     )));
                 }
@@ -1713,7 +1724,7 @@ command = "echo hello"
 
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("<name>test</name>"));
-        assert!(prompt.contains("<location>skills/test/SKILL.md</location>"));
+        assert!(prompt.contains("<location>skills/test</location>"));
         assert!(prompt.contains("loaded on demand"));
         assert!(prompt.contains("use_skill(name)"));
         assert!(!prompt.contains("read_skill"));
