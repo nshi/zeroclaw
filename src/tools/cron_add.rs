@@ -90,10 +90,10 @@ impl Tool for CronAddTool {
                         },
                         {
                             "type": "object",
-                            "description": "One-shot schedule at a specific UTC datetime. Example: {\"kind\":\"at\",\"at\":\"2025-12-31T23:59:00Z\"}",
+                            "description": "One-shot schedule at a specific datetime. Example: {\"kind\":\"at\",\"at\":\"2025-12-31T23:59:00-05:00\"}",
                             "properties": {
                                 "kind": { "type": "string", "enum": ["at"] },
-                                "at": { "type": "string", "description": "ISO 8601 UTC datetime string, e.g. '2025-12-31T23:59:00Z'" }
+                                "at": { "type": "string", "description": "ISO 8601 / RFC 3339 datetime, e.g. '2025-12-31T23:59:00-05:00' or '2025-12-31T23:59:00Z'. Timezone offsets are accepted and converted to UTC." }
                             },
                             "required": ["kind", "at"]
                         },
