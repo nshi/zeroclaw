@@ -659,25 +659,6 @@ fn build_channel_system_prompt(
         prompt.push('\n');
     }
 
-    // Refresh the stale datetime in the cached system prompt
-    {
-        let now = chrono::Local::now();
-        let fresh = format!(
-            "## Current Date & Time\n{} ({})\n\n",
-            now.format("%Y-%m-%d %H:%M:%S"),
-            now.format("%Z"),
-        );
-        if let Some(start) = prompt.find("## Current Date & Time\n") {
-            // Find the end of this section (next "## " heading or end of string)
-            let rest = &prompt[start + 24..]; // skip past "## Current Date & Time\n\n"
-            let section_end = rest
-                .find("\n\n## ")
-                .map(|i| start + 24 + i)
-                .unwrap_or(prompt.len());
-            prompt.replace_range(start..section_end, fresh.trim_end());
-        }
-    }
-
     if let Some(instructions) = channel_delivery_instructions(channel_name) {
         if prompt.is_empty() {
             prompt = instructions.to_string();
@@ -2601,11 +2582,12 @@ async fn process_channel_message(
     };
 
     // Preserve user turn before the LLM call so interrupted requests keep context.
-    append_sender_turn(ctx.as_ref(), &history_key, ChatMessage::user(&msg.content));
+    let stamped_content = crate::agent::prompt::timestamp_prefix(&msg.content, None);
+    append_sender_turn(ctx.as_ref(), &history_key, ChatMessage::user(&stamped_content));
 
     // Build history from per-sender conversation cache.
     let prior_turns_raw = if force_fresh_session {
-        vec![ChatMessage::user(&msg.content)]
+        vec![ChatMessage::user(&stamped_content)]
     } else {
         ctx.conversation_histories
             .lock()
@@ -3926,16 +3908,7 @@ pub fn build_system_prompt_with_mode_and_autonomy(
         load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
     }
 
-    // ── 6. Date & Time ──────────────────────────────────────────
-    let now = chrono::Local::now();
-    let _ = writeln!(
-        prompt,
-        "## Current Date & Time\n{} ({})\n\n",
-        now.format("%Y-%m-%d %H:%M:%S"),
-        now.format("%Z")
-    );
-
-    // ── 7. Runtime ──────────────────────────────────────────────
+    // ── 6. Runtime ──────────────────────────────────────────────
     let host =
         hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
     let _ = writeln!(
@@ -8556,10 +8529,6 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(
             prompt.contains("## Project Context"),
             "missing Project Context"
-        );
-        assert!(
-            prompt.contains("## Current Date & Time"),
-            "missing Date/Time"
         );
         assert!(prompt.contains("## Runtime"), "missing Runtime section");
     }

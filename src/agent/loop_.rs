@@ -3927,12 +3927,7 @@ pub async fn run(
             .map(|r| build_hardware_context(r, &effective_msg, &board_names, rag_limit))
             .unwrap_or_default();
         let context = format!("{mem_context}{hw_context}");
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-        let enriched = if context.is_empty() {
-            format!("[{now}] {effective_msg}")
-        } else {
-            format!("{context}[{now}] {effective_msg}")
-        };
+        let enriched = crate::agent::prompt::timestamp_prefix(&effective_msg, Some(&context));
 
         let mut history = vec![
             ChatMessage::system(&system_prompt),
@@ -4205,12 +4200,7 @@ pub async fn run(
                 .map(|r| build_hardware_context(r, &effective_input, &board_names, rag_limit))
                 .unwrap_or_default();
             let context = format!("{mem_context}{hw_context}");
-            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-            let enriched = if context.is_empty() {
-                format!("[{now}] {effective_input}")
-            } else {
-                format!("{context}[{now}] {effective_input}")
-            };
+            let enriched = crate::agent::prompt::timestamp_prefix(&effective_input, Some(&context));
 
             history.push(ChatMessage::user(&enriched));
 
@@ -4754,12 +4744,7 @@ pub async fn process_message(
         .map(|r| build_hardware_context(r, effective_msg_ref, &board_names, rag_limit))
         .unwrap_or_default();
     let context = format!("{mem_context}{hw_context}");
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-    let enriched = if context.is_empty() {
-        format!("[{now}] {effective_message}")
-    } else {
-        format!("{context}[{now}] {effective_message}")
-    };
+    let enriched = crate::agent::prompt::timestamp_prefix(effective_msg_ref, Some(&context));
 
     let mut history = vec![
         ChatMessage::system(&system_prompt),
