@@ -6,13 +6,22 @@ use crate::security::AutonomyLevel;
 use crate::skills::Skill;
 use crate::tools::Tool;
 use anyhow::Result;
-use chrono::{Datelike, Local, Timelike};
+use chrono::Local;
 use std::fmt::Write;
 use std::path::Path;
 
 pub const TOOL_CALL_INSTRUCTIONS: &str =
     "Provide ONLY the JSON object inside <tool_call> tags. Do NOT include comments, explanations, or any other text inside the tags. Comments are a waste of context. Before calling a tool, check your conversation history. If the exact tool and arguments were already used and returned a result, DO NOT call it again. Instead, use the existing result to answer or move to the next step.";
 
+/// Prefix a user message with the current local timestamp so the LLM has an
+/// accurate sense of "now" on every turn (system prompt stays stable for caching).
+pub fn timestamp_prefix(message: &str, context: Option<&str>) -> String {
+    let ts = Local::now().format("[%Y-%m-%d %H:%M:%S %Z]");
+    match context {
+        Some(ctx) if !ctx.is_empty() => format!("{ts}\n\n{ctx}\n\n{message}"),
+        _ => format!("{ts}\n\n{message}"),
+    }
+}
 
 pub struct PromptContext<'a> {
     pub workspace_dir: &'a Path,
@@ -50,7 +59,6 @@ impl SystemPromptBuilder {
     pub fn with_defaults() -> Self {
         Self {
             sections: vec![
-                Box::new(DateTimeSection),
                 Box::new(IdentitySection),
                 Box::new(ModelGuidanceSection),
                 Box::new(ToolHonestySection),
@@ -92,7 +100,6 @@ pub struct SafetySection;
 pub struct SkillsSection;
 pub struct WorkspaceSection;
 pub struct RuntimeSection;
-pub struct DateTimeSection;
 pub struct ChannelMediaSection;
 pub struct ModelGuidanceSection;
 
@@ -265,30 +272,6 @@ impl PromptSection for RuntimeSection {
             "## Runtime\n\nHost: {host} | OS: {} | Model: {}",
             std::env::consts::OS,
             ctx.model_name
-        ))
-    }
-}
-
-impl PromptSection for DateTimeSection {
-    fn name(&self) -> &str {
-        "datetime"
-    }
-
-    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
-        let now = Local::now();
-        // Force Gregorian year to avoid confusion with local calendars (e.g. Buddhist calendar).
-        let (year, month, day) = (now.year(), now.month(), now.day());
-        let (hour, minute, second) = (now.hour(), now.minute(), now.second());
-        let tz = now.format("%Z");
-
-        Ok(format!(
-            "## CRITICAL CONTEXT: CURRENT DATE & TIME\n\n\
-             The following is the ABSOLUTE TRUTH regarding the current date and time. \
-             Use this for all relative time calculations (e.g. \"last 7 days\").\n\n\
-             Date: {year:04}-{month:02}-{day:02}\n\
-             Time: {hour:02}:{minute:02}:{second:02} ({tz})\n\
-             ISO 8601: {year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}{}",
-            now.format("%:z")
         ))
     }
 }
@@ -515,28 +498,19 @@ mod tests {
     }
 
     #[test]
-    fn datetime_section_includes_timestamp_and_timezone() {
-        let tools: Vec<Box<dyn Tool>> = vec![];
-        let ctx = PromptContext {
-            workspace_dir: Path::new("/tmp"),
-            model_name: "test-model",
-            tools: &tools,
-            skills: &[],
-            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
-            identity_config: None,
-            dispatcher_instructions: "instr",
-            tool_descriptions: None,
-            security_summary: None,
-            autonomy_level: AutonomyLevel::Supervised,
-        };
+    fn timestamp_prefix_includes_date_and_message() {
+        let result = timestamp_prefix("hello world", None);
+        assert!(result.starts_with('['));
+        assert!(result.contains("hello world"));
+        let bracket_end = result.find(']').expect("closing bracket");
+        let ts = &result[1..bracket_end];
+        assert!(ts.len() >= 19, "timestamp too short: {ts}");
+    }
 
-        let rendered = DateTimeSection.build(&ctx).unwrap();
-        assert!(rendered.starts_with("## CRITICAL CONTEXT: CURRENT DATE & TIME\n\n"));
-
-        let payload = rendered.trim_start_matches("## CRITICAL CONTEXT: CURRENT DATE & TIME\n\n");
-        assert!(payload.chars().any(|c| c.is_ascii_digit()));
-        assert!(payload.contains("Date:"));
-        assert!(payload.contains("Time:"));
+    #[test]
+    fn timestamp_prefix_with_context_inserts_between() {
+        let result = timestamp_prefix("msg", Some("ctx"));
+        assert!(result.contains("ctx\n\nmsg"));
     }
 
     #[test]

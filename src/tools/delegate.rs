@@ -1034,8 +1034,7 @@ impl DelegateTool {
             .add_section(Box::new(crate::agent::prompt::ToolsSection))
             .add_section(Box::new(crate::agent::prompt::SafetySection))
             .add_section(Box::new(crate::agent::prompt::SkillsSection))
-            .add_section(Box::new(crate::agent::prompt::WorkspaceSection))
-            .add_section(Box::new(crate::agent::prompt::DateTimeSection));
+            .add_section(Box::new(crate::agent::prompt::WorkspaceSection));
 
         let mut enriched = builder.build(&ctx).unwrap_or_default();
 
@@ -1112,7 +1111,7 @@ impl DelegateTool {
         if let Some(system_prompt) = enriched_system_prompt.as_ref() {
             history.push(ChatMessage::system(system_prompt.clone()));
         }
-        history.push(ChatMessage::user(full_prompt.to_string()));
+        history.push(ChatMessage::user(crate::agent::prompt::timestamp_prefix(full_prompt, None)));
 
         let noop_observer = NoopObserver;
 
@@ -2014,10 +2013,6 @@ mod tests {
         assert!(
             prompt.contains(&workspace.display().to_string()),
             "should contain workspace path"
-        );
-        assert!(
-            prompt.contains("## CRITICAL CONTEXT: CURRENT DATE & TIME"),
-            "should contain datetime section"
         );
         assert!(
             prompt.contains("You are a code reviewer."),
