@@ -84,6 +84,11 @@ struct NativeChatRequest {
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    /// Top-level automatic cache control for Anthropic models via OpenRouter.
+    /// When set, Anthropic automatically places cache breakpoints on the last
+    /// cacheable block, removing the need for manual per-block annotations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Serialize)]
@@ -215,12 +220,12 @@ impl OpenRouterProvider {
         self
     }
 
-    fn convert_tools(tools: Option<&[ToolSpec]>, model: &str) -> Option<Vec<NativeToolSpec>> {
+    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<NativeToolSpec>> {
         let items = tools?;
         if items.is_empty() {
             return None;
         }
-        let mut valid: Vec<NativeToolSpec> = items
+        let valid: Vec<NativeToolSpec> = items
             .iter()
             .filter(|tool| is_valid_openai_tool_name(&tool.name))
             .map(|tool| NativeToolSpec {
@@ -233,24 +238,13 @@ impl OpenRouterProvider {
                 },
             })
             .collect();
-        if valid.is_empty() {
-            return None;
-        }
-        // Cache the last tool definition for Anthropic models (caches all tools).
-        if is_anthropic_model(model) {
-            if let Some(last) = valid.last_mut() {
-                last.function.cache_control = Some(CacheControl::ephemeral());
-            }
-        }
-        Some(valid)
+        if valid.is_empty() { None } else { Some(valid) }
     }
 
-    fn convert_messages(messages: &[ChatMessage], model: &str) -> Vec<NativeMessage> {
-        let apply_cache = is_anthropic_model(model);
-        let mut native_messages: Vec<NativeMessage> =
-            messages
-                .iter()
-                .map(|m| {
+    fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
+        messages
+            .iter()
+            .map(|m| {
                     if m.role == "assistant" {
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
                             if let Some(tool_calls_value) = value.get("tool_calls") {
@@ -319,50 +313,7 @@ impl OpenRouterProvider {
                         reasoning_content: None,
                     }
                 })
-                .collect();
-
-        if apply_cache {
-            Self::apply_anthropic_cache_control(&mut native_messages);
-        }
-        native_messages
-    }
-
-    /// Apply Anthropic-style cache control breakpoints to the message list.
-    ///
-    /// Sets `cache_control: ephemeral` on:
-    /// - System message content (enables caching the system prompt)
-    /// - The last non-system message content (breakpoint caching for the
-    ///   conversation turn boundary)
-    fn apply_anthropic_cache_control(messages: &mut [NativeMessage]) {
-        // Cache system message content.
-        for msg in messages.iter_mut() {
-            if msg.role == "system" {
-                if let Some(MessageContent::Parts(parts)) = &mut msg.content {
-                    if let Some(MessagePart::Text { cache_control, .. }) = parts.last_mut() {
-                        *cache_control = Some(CacheControl::ephemeral());
-                    }
-                } else if let Some(MessageContent::Text(text)) = msg.content.take() {
-                    msg.content = Some(MessageContent::Parts(vec![MessagePart::Text {
-                        text,
-                        cache_control: Some(CacheControl::ephemeral()),
-                    }]));
-                }
-            }
-        }
-
-        // Cache the last non-system message (conversation breakpoint).
-        if let Some(last_msg) = messages.iter_mut().rfind(|m| m.role != "system") {
-            if let Some(MessageContent::Parts(parts)) = &mut last_msg.content {
-                if let Some(MessagePart::Text { cache_control, .. }) = parts.last_mut() {
-                    *cache_control = Some(CacheControl::ephemeral());
-                }
-            } else if let Some(MessageContent::Text(text)) = last_msg.content.take() {
-                last_msg.content = Some(MessageContent::Parts(vec![MessagePart::Text {
-                    text,
-                    cache_control: Some(CacheControl::ephemeral()),
-                }]));
-            }
-        }
+            .collect()
     }
 
     fn to_message_content(role: &str, content: &str) -> MessageContent {
@@ -598,14 +549,15 @@ impl Provider for OpenRouterProvider {
         )
         })?;
 
-        let tools = Self::convert_tools(request.tools, model);
+        let tools = Self::convert_tools(request.tools);
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(request.messages, model),
+            messages: Self::convert_messages(request.messages),
             temperature,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
             max_tokens: self.max_tokens,
+            cache_control: is_anthropic_model(model).then(CacheControl::ephemeral),
         };
 
         let response = self
@@ -662,7 +614,7 @@ impl Provider for OpenRouterProvider {
         let native_tools: Option<Vec<NativeToolSpec>> = if tools.is_empty() {
             None
         } else {
-            let mut specs: Vec<NativeToolSpec> = tools
+            let specs: Vec<NativeToolSpec> = tools
                 .iter()
                 .filter_map(|t| {
                     let func = t.get("function")?;
@@ -684,18 +636,12 @@ impl Provider for OpenRouterProvider {
                     })
                 })
                 .collect();
-            // Cache the last tool definition for Anthropic models.
-            if is_anthropic_model(model) {
-                if let Some(last) = specs.last_mut() {
-                    last.function.cache_control = Some(CacheControl::ephemeral());
-                }
-            }
             if specs.is_empty() { None } else { Some(specs) }
         };
 
         // Convert ChatMessage to NativeMessage, preserving structured assistant/tool entries
         // when history contains native tool-call metadata.
-        let native_messages = Self::convert_messages(messages, model);
+        let native_messages = Self::convert_messages(messages);
 
         let native_request = NativeChatRequest {
             model: model.to_string(),
@@ -704,6 +650,7 @@ impl Provider for OpenRouterProvider {
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,
             max_tokens: self.max_tokens,
+            cache_control: is_anthropic_model(model).then(CacheControl::ephemeral),
         };
 
         let response = self
@@ -1044,7 +991,7 @@ mod tests {
                 .into(),
         }];
 
-        let converted = OpenRouterProvider::convert_messages(&messages, "openai/gpt-4o");
+        let converted = OpenRouterProvider::convert_messages(&messages);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "assistant");
         assert_eq!(
@@ -1072,7 +1019,7 @@ mod tests {
             content: r#"{"tool_call_id":"call_xyz","content":"done"}"#.into(),
         }];
 
-        let converted = OpenRouterProvider::convert_messages(&messages, "openai/gpt-4o");
+        let converted = OpenRouterProvider::convert_messages(&messages);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "tool");
         assert_eq!(converted[0].tool_call_id.as_deref(), Some("call_xyz"));
@@ -1191,7 +1138,7 @@ mod tests {
             role: "assistant".into(),
             content: history_json.to_string(),
         }];
-        let native = OpenRouterProvider::convert_messages(&messages, "openai/gpt-4o");
+        let native = OpenRouterProvider::convert_messages(&messages);
         assert_eq!(native.len(), 1);
         assert_eq!(
             native[0].reasoning_content.as_deref(),
@@ -1214,7 +1161,7 @@ mod tests {
             role: "assistant".into(),
             content: history_json.to_string(),
         }];
-        let native = OpenRouterProvider::convert_messages(&messages, "openai/gpt-4o");
+        let native = OpenRouterProvider::convert_messages(&messages);
         assert_eq!(native.len(), 1);
         assert!(native[0].reasoning_content.is_none());
     }
@@ -1308,7 +1255,7 @@ mod tests {
             },
         ];
 
-        let result = OpenRouterProvider::convert_tools(Some(&tools), "openai/gpt-4o").unwrap();
+        let result = OpenRouterProvider::convert_tools(Some(&tools)).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].function.name, "valid_tool");
         assert_eq!(result[1].function.name, "another-valid");
@@ -1324,7 +1271,7 @@ mod tests {
             parameters: serde_json::json!({"type": "object"}),
         }];
 
-        assert!(OpenRouterProvider::convert_tools(Some(&tools), "openai/gpt-4o").is_none());
+        assert!(OpenRouterProvider::convert_tools(Some(&tools)).is_none());
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1374,108 +1321,34 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn convert_messages_applies_cache_control_for_anthropic_models() {
-        let messages = vec![
-            ChatMessage::system("You are a helpful assistant."),
-            ChatMessage::user("Hello"),
-        ];
-
-        let native =
-            OpenRouterProvider::convert_messages(&messages, "anthropic/claude-sonnet-4-20250514");
-        assert_eq!(native.len(), 2);
-
-        // System message should have cache_control on its content.
-        match &native[0].content {
-            Some(MessageContent::Parts(parts)) => {
-                if let MessagePart::Text { cache_control, .. } = &parts[0] {
-                    assert!(cache_control.is_some());
-                    assert_eq!(cache_control.as_ref().unwrap().cache_type, "ephemeral");
-                } else {
-                    panic!("expected Text part");
-                }
-            }
-            other => panic!("expected Parts, got {other:?}"),
-        }
-
-        // Last non-system message (user) should also have cache_control.
-        match &native[1].content {
-            Some(MessageContent::Parts(parts)) => {
-                if let MessagePart::Text { cache_control, .. } = &parts[0] {
-                    assert!(cache_control.is_some());
-                } else {
-                    panic!("expected Text part");
-                }
-            }
-            other => panic!("expected Parts, got {other:?}"),
-        }
+    fn native_request_includes_cache_control_for_anthropic_models() {
+        let request = NativeChatRequest {
+            model: "anthropic/claude-sonnet-4-20250514".into(),
+            messages: vec![],
+            temperature: 0.5,
+            tools: None,
+            tool_choice: None,
+            max_tokens: None,
+            cache_control: is_anthropic_model("anthropic/claude-sonnet-4-20250514")
+                .then(CacheControl::ephemeral),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""cache_control":{"type":"ephemeral"}"#));
     }
 
     #[test]
-    fn convert_messages_omits_cache_control_for_non_anthropic_models() {
-        let messages = vec![
-            ChatMessage::system("You are a helpful assistant."),
-            ChatMessage::user("Hello"),
-        ];
-
-        let native = OpenRouterProvider::convert_messages(&messages, "openai/gpt-4o");
-        assert_eq!(native.len(), 2);
-
-        // System message should be plain text without cache_control.
-        match &native[0].content {
-            Some(MessageContent::Text(_)) => {} // Good — plain text, no parts
-            other => panic!("expected plain Text for non-anthropic model, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn convert_tools_applies_cache_control_for_anthropic_models() {
-        use crate::tools::ToolSpec;
-
-        let tools = vec![
-            ToolSpec {
-                name: "shell".into(),
-                description: "Run commands".into(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-            ToolSpec {
-                name: "file_read".into(),
-                description: "Read files".into(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-        ];
-
-        let result =
-            OpenRouterProvider::convert_tools(Some(&tools), "anthropic/claude-sonnet-4-20250514")
-                .unwrap();
-        assert_eq!(result.len(), 2);
-
-        // First tool should NOT have cache_control.
-        assert!(result[0].function.cache_control.is_none());
-        // Last tool SHOULD have cache_control (caches all preceding tools).
-        assert!(result[1].function.cache_control.is_some());
-        assert_eq!(
-            result[1]
-                .function
-                .cache_control
-                .as_ref()
-                .unwrap()
-                .cache_type,
-            "ephemeral"
-        );
-    }
-
-    #[test]
-    fn convert_tools_omits_cache_control_for_non_anthropic_models() {
-        use crate::tools::ToolSpec;
-
-        let tools = vec![ToolSpec {
-            name: "shell".into(),
-            description: "Run commands".into(),
-            parameters: serde_json::json!({"type": "object"}),
-        }];
-
-        let result = OpenRouterProvider::convert_tools(Some(&tools), "openai/gpt-4o").unwrap();
-        assert!(result[0].function.cache_control.is_none());
+    fn native_request_omits_cache_control_for_non_anthropic_models() {
+        let request = NativeChatRequest {
+            model: "openai/gpt-4o".into(),
+            messages: vec![],
+            temperature: 0.5,
+            tools: None,
+            tool_choice: None,
+            max_tokens: None,
+            cache_control: is_anthropic_model("openai/gpt-4o").then(CacheControl::ephemeral),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("cache_control"));
     }
 
     #[test]
