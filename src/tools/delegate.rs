@@ -1082,11 +1082,13 @@ impl DelegateTool {
             .filter(|name| !name.is_empty())
             .collect::<std::collections::HashSet<_>>();
 
+        let allow_all = allowed.contains(super::ALLOWED_TOOLS_WILDCARD);
+
         let sub_tools: Vec<Box<dyn Tool>> = {
             let parent_tools = self.parent_tools.read();
             parent_tools
                 .iter()
-                .filter(|tool| allowed.contains(tool.name()))
+                .filter(|tool| allow_all || allowed.contains(tool.name()))
                 .filter(|tool| tool.name() != "delegate")
                 .map(|tool| Box::new(ToolArcRef::new(tool.clone())) as Box<dyn Tool>)
                 .collect()
@@ -1783,6 +1785,26 @@ mod tests {
                 .unwrap_or("")
                 .contains("no executable tools")
         );
+    }
+
+    #[tokio::test]
+    async fn agentic_wildcard_grants_all_parent_tools() {
+        let config = agentic_config(vec!["*".to_string()], 10);
+        let tool = DelegateTool::new(HashMap::new(), None, test_security()).with_parent_tools(
+            Arc::new(RwLock::new(vec![
+                Arc::new(EchoTool),
+                Arc::new(DelegateTool::new(HashMap::new(), None, test_security())),
+            ])),
+        );
+
+        let provider = OneToolThenFinalProvider;
+        let result = tool
+            .execute_agentic("agentic", &config, &provider, "run", 0.2)
+            .await
+            .unwrap();
+
+        // Should succeed: wildcard exposes EchoTool (delegate is always excluded).
+        assert!(result.success, "expected success, got: {result:?}");
     }
 
     #[tokio::test]

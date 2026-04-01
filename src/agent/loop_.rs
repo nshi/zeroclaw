@@ -145,6 +145,7 @@ pub(crate) fn filter_by_allowed_tools(
 ) -> Vec<crate::tools::ToolSpec> {
     match allowed {
         None => specs,
+        Some(list) if list.iter().any(|n| n == crate::tools::ALLOWED_TOOLS_WILDCARD) => specs,
         Some(list) => specs
             .into_iter()
             .filter(|spec| list.iter().any(|name| name == &spec.name))
@@ -3555,7 +3556,9 @@ pub async fn run(
     // those tools whose name appears in the list. Unknown names are silently
     // ignored. When `None`, all tools remain available (backward compatible).
     if let Some(ref allow_list) = allowed_tools {
-        tools_registry.retain(|t| allow_list.iter().any(|name| name == t.name()));
+        if !allow_list.iter().any(|n| n == crate::tools::ALLOWED_TOOLS_WILDCARD) {
+            tools_registry.retain(|t| allow_list.iter().any(|name| name == t.name()));
+        }
         tracing::info!(
             allowed = allow_list.len(),
             retained = tools_registry.len(),

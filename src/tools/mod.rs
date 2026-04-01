@@ -220,6 +220,9 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Wildcard sentinel for tool allowlists: grants access to all tools.
+pub const ALLOWED_TOOLS_WILDCARD: &str = "*";
+
 /// Shared handle to the delegate tool's parent-tools list.
 /// Callers can push additional tools (e.g. MCP wrappers) after construction.
 pub type DelegateParentToolsHandle = Arc<RwLock<Vec<Arc<dyn Tool>>>>;
