@@ -43,14 +43,8 @@ enum MessageContent {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum MessagePart {
-    Text {
-        text: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControl>,
-    },
-    ImageUrl {
-        image_url: ImageUrlPart,
-    },
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlPart },
 }
 
 #[derive(Debug, Serialize)]
@@ -118,8 +112,6 @@ struct NativeToolFunctionSpec {
     name: String,
     description: String,
     parameters: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -234,7 +226,6 @@ impl OpenRouterProvider {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: tool.parameters.clone(),
-                    cache_control: None,
                 },
             })
             .collect();
@@ -331,7 +322,6 @@ impl OpenRouterProvider {
         if !trimmed_text.is_empty() {
             parts.push(MessagePart::Text {
                 text: trimmed_text.to_string(),
-                cache_control: None,
             });
         }
 
@@ -395,6 +385,14 @@ impl OpenRouterProvider {
                 "{provider_name} API returned an unexpected {kind} payload: {error}; body={snippet}"
             )
         })
+    }
+
+    fn token_usage_from(usage: UsageInfo) -> TokenUsage {
+        TokenUsage {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+            cached_input_tokens: usage.prompt_tokens_details.and_then(|d| d.cached_tokens),
+        }
     }
 
     fn http_client(&self) -> Client {
@@ -577,11 +575,7 @@ impl Provider for OpenRouterProvider {
         let body = Self::read_response_body("OpenRouter", response).await?;
         let native_response =
             Self::parse_response_body::<NativeChatResponse>("OpenRouter", &body, "native chat")?;
-        let usage = native_response.usage.map(|u| TokenUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            cached_input_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
-        });
+        let usage = native_response.usage.map(Self::token_usage_from);
         let message = native_response
             .choices
             .into_iter()
@@ -631,7 +625,6 @@ impl Provider for OpenRouterProvider {
                                 .get("parameters")
                                 .cloned()
                                 .unwrap_or(serde_json::json!({})),
-                            cache_control: None,
                         },
                     })
                 })
@@ -670,11 +663,7 @@ impl Provider for OpenRouterProvider {
         let body = Self::read_response_body("OpenRouter", response).await?;
         let native_response =
             Self::parse_response_body::<NativeChatResponse>("OpenRouter", &body, "native chat")?;
-        let usage = native_response.usage.map(|u| TokenUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            cached_input_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
-        });
+        let usage = native_response.usage.map(Self::token_usage_from);
         let message = native_response
             .choices
             .into_iter()
