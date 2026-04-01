@@ -274,7 +274,9 @@ impl AgentBuilder {
             .ok_or_else(|| anyhow::anyhow!("tools are required"))?;
         let allowed = self.allowed_tools.clone();
         if let Some(ref allow_list) = allowed {
-            tools.retain(|t| allow_list.iter().any(|name| name == t.name()));
+            if !allow_list.iter().any(|n| n == crate::tools::ALLOWED_TOOLS_WILDCARD) {
+                tools.retain(|t| allow_list.iter().any(|name| name == t.name()));
+            }
         }
         let tool_specs = tools.iter().map(|tool| tool.spec()).collect();
 
