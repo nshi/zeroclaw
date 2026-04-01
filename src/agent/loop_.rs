@@ -2665,11 +2665,11 @@ pub(crate) async fn run_tool_call_loop(
             response_streamed_live,
         ) = match chat_result {
             Ok(resp) => {
-                let (resp_input_tokens, resp_output_tokens) = resp
+                let (resp_input_tokens, resp_output_tokens, resp_cached_input_tokens) = resp
                     .usage
                     .as_ref()
-                    .map(|u| (u.input_tokens, u.output_tokens))
-                    .unwrap_or((None, None));
+                    .map(|u| (u.input_tokens, u.output_tokens, u.cached_input_tokens))
+                    .unwrap_or((None, None, None));
 
                 observer.record_event(&ObserverEvent::LlmResponse {
                     provider: provider_name.to_string(),
@@ -2679,10 +2679,11 @@ pub(crate) async fn run_tool_call_loop(
                     error_message: None,
                     input_tokens: resp_input_tokens,
                     output_tokens: resp_output_tokens,
+                    cached_input_tokens: resp_cached_input_tokens,
                 });
 
                 // Record cost via task-local tracker (no-op when not scoped)
-                let _ = resp
+                let cost_info = resp
                     .usage
                     .as_ref()
                     .and_then(|usage| record_tool_loop_cost_usage(provider_name, model, usage));
@@ -2745,6 +2746,8 @@ pub(crate) async fn run_tool_call_loop(
                         "duration_ms": llm_started_at.elapsed().as_millis(),
                         "input_tokens": resp_input_tokens,
                         "output_tokens": resp_output_tokens,
+                        "cached_input_tokens": resp_cached_input_tokens,
+                        "cost_usd": cost_info.map(|(_, c)| c),
                         "raw_response": scrub_credentials(&response_text),
                         "native_tool_calls": resp.tool_calls.len(),
                         "parsed_tool_calls": calls.len(),
@@ -2794,6 +2797,7 @@ pub(crate) async fn run_tool_call_loop(
                     error_message: Some(safe_error.clone()),
                     input_tokens: None,
                     output_tokens: None,
+                    cached_input_tokens: None,
                 });
                 runtime_trace::record_event(
                     "llm_response",
@@ -3432,7 +3436,9 @@ pub(crate) fn build_tool_instructions(
     instructions.push_str("\n## Tool Use Protocol\n\n");
     instructions.push_str("To use a tool, wrap a JSON object in <tool_call></tool_call> tags:\n\n");
     instructions.push_str("```\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n</tool_call>\n```\n\n");
-    instructions.push_str("CRITICAL: Output actual <tool_call> tags—never describe steps or give examples. ");
+    instructions.push_str(
+        "CRITICAL: Output actual <tool_call> tags—never describe steps or give examples. ",
+    );
     instructions.push_str(crate::agent::prompt::TOOL_CALL_INSTRUCTIONS);
     instructions.push_str("\n\n");
     instructions.push_str("Example: User says \"what's the date?\". You MUST respond with:\n<tool_call>\n{\"name\":\"shell\",\"arguments\":{\"command\":\"date\"}}\n</tool_call>\n\n");
