@@ -43,8 +43,14 @@ enum MessageContent {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum MessagePart {
-    Text { text: String },
-    ImageUrl { image_url: ImageUrlPart },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    ImageUrl {
+        image_url: ImageUrlPart,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +113,8 @@ struct NativeToolFunctionSpec {
     name: String,
     description: String,
     parameters: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -137,6 +145,14 @@ struct UsageInfo {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +169,27 @@ struct NativeResponseMessage {
     reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<NativeToolCall>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    cache_type: String,
+}
+
+impl CacheControl {
+    fn ephemeral() -> Self {
+        Self {
+            cache_type: "ephemeral".to_string(),
+        }
+    }
+}
+
+/// Returns `true` when the model name targets an Anthropic model via OpenRouter
+/// (e.g. `anthropic/claude-sonnet-4-20250514`).  OpenRouter passes
+/// `cache_control` annotations through to Anthropic for these models.
+fn is_anthropic_model(model: &str) -> bool {
+    model.starts_with("anthropic/")
 }
 
 impl OpenRouterProvider {
@@ -178,12 +215,12 @@ impl OpenRouterProvider {
         self
     }
 
-    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<NativeToolSpec>> {
+    fn convert_tools(tools: Option<&[ToolSpec]>, model: &str) -> Option<Vec<NativeToolSpec>> {
         let items = tools?;
         if items.is_empty() {
             return None;
         }
-        let valid: Vec<NativeToolSpec> = items
+        let mut valid: Vec<NativeToolSpec> = items
             .iter()
             .filter(|tool| is_valid_openai_tool_name(&tool.name))
             .map(|tool| NativeToolSpec {
@@ -192,85 +229,140 @@ impl OpenRouterProvider {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: tool.parameters.clone(),
+                    cache_control: None,
                 },
             })
             .collect();
-        if valid.is_empty() { None } else { Some(valid) }
+        if valid.is_empty() {
+            return None;
+        }
+        // Cache the last tool definition for Anthropic models (caches all tools).
+        if is_anthropic_model(model) {
+            if let Some(last) = valid.last_mut() {
+                last.function.cache_control = Some(CacheControl::ephemeral());
+            }
+        }
+        Some(valid)
     }
 
-    fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
-        messages
-            .iter()
-            .map(|m| {
-                if m.role == "assistant" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                        if let Some(tool_calls_value) = value.get("tool_calls") {
-                            if let Ok(parsed_calls) =
-                                serde_json::from_value::<Vec<ProviderToolCall>>(
-                                    tool_calls_value.clone(),
-                                )
-                            {
-                                let tool_calls = parsed_calls
-                                    .into_iter()
-                                    .map(|tc| NativeToolCall {
-                                        id: Some(tc.id),
-                                        kind: Some("function".to_string()),
-                                        function: NativeFunctionCall {
-                                            name: tc.name,
-                                            arguments: tc.arguments,
-                                        },
-                                    })
-                                    .collect::<Vec<_>>();
-                                let content = value
-                                    .get("content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(|value| MessageContent::Text(value.to_string()));
-                                let reasoning_content = value
-                                    .get("reasoning_content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(ToString::to_string);
-                                return NativeMessage {
-                                    role: "assistant".to_string(),
-                                    content,
-                                    tool_call_id: None,
-                                    tool_calls: Some(tool_calls),
-                                    reasoning_content,
-                                };
+    fn convert_messages(messages: &[ChatMessage], model: &str) -> Vec<NativeMessage> {
+        let apply_cache = is_anthropic_model(model);
+        let mut native_messages: Vec<NativeMessage> =
+            messages
+                .iter()
+                .map(|m| {
+                    if m.role == "assistant" {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
+                            if let Some(tool_calls_value) = value.get("tool_calls") {
+                                if let Ok(parsed_calls) =
+                                    serde_json::from_value::<Vec<ProviderToolCall>>(
+                                        tool_calls_value.clone(),
+                                    )
+                                {
+                                    let tool_calls = parsed_calls
+                                        .into_iter()
+                                        .map(|tc| NativeToolCall {
+                                            id: Some(tc.id),
+                                            kind: Some("function".to_string()),
+                                            function: NativeFunctionCall {
+                                                name: tc.name,
+                                                arguments: tc.arguments,
+                                            },
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let content = value
+                                        .get("content")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(|value| MessageContent::Text(value.to_string()));
+                                    let reasoning_content = value
+                                        .get("reasoning_content")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(ToString::to_string);
+                                    return NativeMessage {
+                                        role: "assistant".to_string(),
+                                        content,
+                                        tool_call_id: None,
+                                        tool_calls: Some(tool_calls),
+                                        reasoning_content,
+                                    };
+                                }
                             }
                         }
                     }
-                }
 
-                if m.role == "tool" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                        let tool_call_id = value
-                            .get("tool_call_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                        let content = value
-                            .get("content")
-                            .and_then(serde_json::Value::as_str)
-                            .map(|value| MessageContent::Text(value.to_string()))
-                            .or_else(|| Some(MessageContent::Text(m.content.clone())));
-                        return NativeMessage {
-                            role: "tool".to_string(),
-                            content,
-                            tool_call_id,
-                            tool_calls: None,
-                            reasoning_content: None,
-                        };
+                    if m.role == "tool" {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
+                            let tool_call_id = value
+                                .get("tool_call_id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToString::to_string);
+                            let content = value
+                                .get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .map(|value| MessageContent::Text(value.to_string()))
+                                .or_else(|| Some(MessageContent::Text(m.content.clone())));
+                            return NativeMessage {
+                                role: "tool".to_string(),
+                                content,
+                                tool_call_id,
+                                tool_calls: None,
+                                reasoning_content: None,
+                            };
+                        }
                     }
-                }
 
-                NativeMessage {
-                    role: m.role.clone(),
-                    content: Some(Self::to_message_content(&m.role, &m.content)),
-                    tool_call_id: None,
-                    tool_calls: None,
-                    reasoning_content: None,
+                    NativeMessage {
+                        role: m.role.clone(),
+                        content: Some(Self::to_message_content(&m.role, &m.content)),
+                        tool_call_id: None,
+                        tool_calls: None,
+                        reasoning_content: None,
+                    }
+                })
+                .collect();
+
+        if apply_cache {
+            Self::apply_anthropic_cache_control(&mut native_messages);
+        }
+        native_messages
+    }
+
+    /// Apply Anthropic-style cache control breakpoints to the message list.
+    ///
+    /// Sets `cache_control: ephemeral` on:
+    /// - System message content (enables caching the system prompt)
+    /// - The last non-system message content (breakpoint caching for the
+    ///   conversation turn boundary)
+    fn apply_anthropic_cache_control(messages: &mut [NativeMessage]) {
+        // Cache system message content.
+        for msg in messages.iter_mut() {
+            if msg.role == "system" {
+                if let Some(MessageContent::Parts(parts)) = &mut msg.content {
+                    if let Some(MessagePart::Text { cache_control, .. }) = parts.last_mut() {
+                        *cache_control = Some(CacheControl::ephemeral());
+                    }
+                } else if let Some(MessageContent::Text(text)) = msg.content.take() {
+                    msg.content = Some(MessageContent::Parts(vec![MessagePart::Text {
+                        text,
+                        cache_control: Some(CacheControl::ephemeral()),
+                    }]));
                 }
-            })
-            .collect()
+            }
+        }
+
+        // Cache the last non-system message (conversation breakpoint).
+        if let Some(last_msg) = messages.iter_mut().rfind(|m| m.role != "system") {
+            if let Some(MessageContent::Parts(parts)) = &mut last_msg.content {
+                if let Some(MessagePart::Text { cache_control, .. }) = parts.last_mut() {
+                    *cache_control = Some(CacheControl::ephemeral());
+                }
+            } else if let Some(MessageContent::Text(text)) = last_msg.content.take() {
+                last_msg.content = Some(MessageContent::Parts(vec![MessagePart::Text {
+                    text,
+                    cache_control: Some(CacheControl::ephemeral()),
+                }]));
+            }
+        }
     }
 
     fn to_message_content(role: &str, content: &str) -> MessageContent {
@@ -288,6 +380,7 @@ impl OpenRouterProvider {
         if !trimmed_text.is_empty() {
             parts.push(MessagePart::Text {
                 text: trimmed_text.to_string(),
+                cache_control: None,
             });
         }
 
@@ -505,10 +598,10 @@ impl Provider for OpenRouterProvider {
         )
         })?;
 
-        let tools = Self::convert_tools(request.tools);
+        let tools = Self::convert_tools(request.tools, model);
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(request.messages),
+            messages: Self::convert_messages(request.messages, model),
             temperature,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
@@ -535,7 +628,7 @@ impl Provider for OpenRouterProvider {
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
-            cached_input_tokens: None,
+            cached_input_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
         });
         let message = native_response
             .choices
@@ -569,7 +662,7 @@ impl Provider for OpenRouterProvider {
         let native_tools: Option<Vec<NativeToolSpec>> = if tools.is_empty() {
             None
         } else {
-            let specs: Vec<NativeToolSpec> = tools
+            let mut specs: Vec<NativeToolSpec> = tools
                 .iter()
                 .filter_map(|t| {
                     let func = t.get("function")?;
@@ -586,16 +679,23 @@ impl Provider for OpenRouterProvider {
                                 .get("parameters")
                                 .cloned()
                                 .unwrap_or(serde_json::json!({})),
+                            cache_control: None,
                         },
                     })
                 })
                 .collect();
+            // Cache the last tool definition for Anthropic models.
+            if is_anthropic_model(model) {
+                if let Some(last) = specs.last_mut() {
+                    last.function.cache_control = Some(CacheControl::ephemeral());
+                }
+            }
             if specs.is_empty() { None } else { Some(specs) }
         };
 
         // Convert ChatMessage to NativeMessage, preserving structured assistant/tool entries
         // when history contains native tool-call metadata.
-        let native_messages = Self::convert_messages(messages);
+        let native_messages = Self::convert_messages(messages, model);
 
         let native_request = NativeChatRequest {
             model: model.to_string(),
@@ -626,7 +726,7 @@ impl Provider for OpenRouterProvider {
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
-            cached_input_tokens: None,
+            cached_input_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
         });
         let message = native_response
             .choices
@@ -944,7 +1044,7 @@ mod tests {
                 .into(),
         }];
 
-        let converted = OpenRouterProvider::convert_messages(&messages);
+        let converted = OpenRouterProvider::convert_messages(&messages, "openai/gpt-4o");
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "assistant");
         assert_eq!(
@@ -972,7 +1072,7 @@ mod tests {
             content: r#"{"tool_call_id":"call_xyz","content":"done"}"#.into(),
         }];
 
-        let converted = OpenRouterProvider::convert_messages(&messages);
+        let converted = OpenRouterProvider::convert_messages(&messages, "openai/gpt-4o");
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "tool");
         assert_eq!(converted[0].tool_call_id.as_deref(), Some("call_xyz"));
@@ -1091,7 +1191,7 @@ mod tests {
             role: "assistant".into(),
             content: history_json.to_string(),
         }];
-        let native = OpenRouterProvider::convert_messages(&messages);
+        let native = OpenRouterProvider::convert_messages(&messages, "openai/gpt-4o");
         assert_eq!(native.len(), 1);
         assert_eq!(
             native[0].reasoning_content.as_deref(),
@@ -1114,7 +1214,7 @@ mod tests {
             role: "assistant".into(),
             content: history_json.to_string(),
         }];
-        let native = OpenRouterProvider::convert_messages(&messages);
+        let native = OpenRouterProvider::convert_messages(&messages, "openai/gpt-4o");
         assert_eq!(native.len(), 1);
         assert!(native[0].reasoning_content.is_none());
     }
@@ -1208,7 +1308,7 @@ mod tests {
             },
         ];
 
-        let result = OpenRouterProvider::convert_tools(Some(&tools)).unwrap();
+        let result = OpenRouterProvider::convert_tools(Some(&tools), "openai/gpt-4o").unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].function.name, "valid_tool");
         assert_eq!(result[1].function.name, "another-valid");
@@ -1224,6 +1324,164 @@ mod tests {
             parameters: serde_json::json!({"type": "object"}),
         }];
 
-        assert!(OpenRouterProvider::convert_tools(Some(&tools)).is_none());
+        assert!(OpenRouterProvider::convert_tools(Some(&tools), "openai/gpt-4o").is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // cached token parsing tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn usage_info_deserializes_with_cached_tokens() {
+        let json = r#"{
+            "prompt_tokens": 500,
+            "completion_tokens": 100,
+            "prompt_tokens_details": { "cached_tokens": 300 }
+        }"#;
+        let usage: UsageInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.prompt_tokens, Some(500));
+        assert_eq!(usage.completion_tokens, Some(100));
+        assert_eq!(
+            usage.prompt_tokens_details.unwrap().cached_tokens,
+            Some(300)
+        );
+    }
+
+    #[test]
+    fn usage_info_deserializes_without_cached_tokens() {
+        let json = r#"{ "prompt_tokens": 200, "completion_tokens": 50 }"#;
+        let usage: UsageInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.prompt_tokens, Some(200));
+        assert!(usage.prompt_tokens_details.is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Anthropic model detection tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn is_anthropic_model_detects_anthropic_prefixed_models() {
+        assert!(is_anthropic_model("anthropic/claude-sonnet-4-20250514"));
+        assert!(is_anthropic_model("anthropic/claude-3-haiku"));
+        assert!(!is_anthropic_model("openai/gpt-4o"));
+        assert!(!is_anthropic_model("deepseek/deepseek-chat"));
+        assert!(!is_anthropic_model("google/gemini-2.5-pro"));
+        assert!(!is_anthropic_model(""));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // cache control for Anthropic models via OpenRouter
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn convert_messages_applies_cache_control_for_anthropic_models() {
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("Hello"),
+        ];
+
+        let native =
+            OpenRouterProvider::convert_messages(&messages, "anthropic/claude-sonnet-4-20250514");
+        assert_eq!(native.len(), 2);
+
+        // System message should have cache_control on its content.
+        match &native[0].content {
+            Some(MessageContent::Parts(parts)) => {
+                if let MessagePart::Text { cache_control, .. } = &parts[0] {
+                    assert!(cache_control.is_some());
+                    assert_eq!(cache_control.as_ref().unwrap().cache_type, "ephemeral");
+                } else {
+                    panic!("expected Text part");
+                }
+            }
+            other => panic!("expected Parts, got {other:?}"),
+        }
+
+        // Last non-system message (user) should also have cache_control.
+        match &native[1].content {
+            Some(MessageContent::Parts(parts)) => {
+                if let MessagePart::Text { cache_control, .. } = &parts[0] {
+                    assert!(cache_control.is_some());
+                } else {
+                    panic!("expected Text part");
+                }
+            }
+            other => panic!("expected Parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convert_messages_omits_cache_control_for_non_anthropic_models() {
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("Hello"),
+        ];
+
+        let native = OpenRouterProvider::convert_messages(&messages, "openai/gpt-4o");
+        assert_eq!(native.len(), 2);
+
+        // System message should be plain text without cache_control.
+        match &native[0].content {
+            Some(MessageContent::Text(_)) => {} // Good — plain text, no parts
+            other => panic!("expected plain Text for non-anthropic model, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convert_tools_applies_cache_control_for_anthropic_models() {
+        use crate::tools::ToolSpec;
+
+        let tools = vec![
+            ToolSpec {
+                name: "shell".into(),
+                description: "Run commands".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolSpec {
+                name: "file_read".into(),
+                description: "Read files".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+
+        let result =
+            OpenRouterProvider::convert_tools(Some(&tools), "anthropic/claude-sonnet-4-20250514")
+                .unwrap();
+        assert_eq!(result.len(), 2);
+
+        // First tool should NOT have cache_control.
+        assert!(result[0].function.cache_control.is_none());
+        // Last tool SHOULD have cache_control (caches all preceding tools).
+        assert!(result[1].function.cache_control.is_some());
+        assert_eq!(
+            result[1]
+                .function
+                .cache_control
+                .as_ref()
+                .unwrap()
+                .cache_type,
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn convert_tools_omits_cache_control_for_non_anthropic_models() {
+        use crate::tools::ToolSpec;
+
+        let tools = vec![ToolSpec {
+            name: "shell".into(),
+            description: "Run commands".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let result = OpenRouterProvider::convert_tools(Some(&tools), "openai/gpt-4o").unwrap();
+        assert!(result[0].function.cache_control.is_none());
+    }
+
+    #[test]
+    fn cache_control_serialization_includes_type_field() {
+        let cc = CacheControl::ephemeral();
+        let json = serde_json::to_string(&cc).unwrap();
+        assert_eq!(json, r#"{"type":"ephemeral"}"#);
     }
 }

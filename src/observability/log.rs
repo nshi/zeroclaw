@@ -79,6 +79,7 @@ impl Observer for LogObserver {
                 error_message,
                 input_tokens,
                 output_tokens,
+                cached_input_tokens,
             } => {
                 let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
                 info!(
@@ -89,6 +90,7 @@ impl Observer for LogObserver {
                     error = ?error_message,
                     input_tokens = ?input_tokens,
                     output_tokens = ?output_tokens,
+                    cached_input_tokens = ?cached_input_tokens,
                     "llm.response"
                 );
             }
@@ -214,6 +216,7 @@ mod tests {
             error_message: None,
             input_tokens: Some(100),
             output_tokens: Some(50),
+            cached_input_tokens: None,
         });
         obs.record_event(&ObserverEvent::LlmResponse {
             provider: "openrouter".into(),
@@ -223,6 +226,7 @@ mod tests {
             error_message: Some("rate limited".into()),
             input_tokens: None,
             output_tokens: None,
+            cached_input_tokens: None,
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),
