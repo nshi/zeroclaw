@@ -1528,6 +1528,7 @@ impl OpenAiCompatibleProvider {
             tool_calls,
             usage: None,
             reasoning_content,
+            provider_attrs: None,
         }
     }
 
@@ -1879,6 +1880,7 @@ impl Provider for OpenAiCompatibleProvider {
                     tool_calls: vec![],
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 });
             }
         };
@@ -1924,6 +1926,7 @@ impl Provider for OpenAiCompatibleProvider {
             tool_calls,
             usage,
             reasoning_content,
+            provider_attrs: None,
         })
     }
 
@@ -1983,6 +1986,7 @@ impl Provider for OpenAiCompatibleProvider {
                             tool_calls: vec![],
                             usage: None,
                             reasoning_content: None,
+                            provider_attrs: None,
                         })
                         .map_err(|responses_err| {
                             anyhow::anyhow!(
@@ -2012,6 +2016,7 @@ impl Provider for OpenAiCompatibleProvider {
                     tool_calls: vec![],
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 });
             }
 
@@ -2024,6 +2029,7 @@ impl Provider for OpenAiCompatibleProvider {
                         tool_calls: vec![],
                         usage: None,
                         reasoning_content: None,
+                        provider_attrs: None,
                     })
                     .map_err(|responses_err| {
                         anyhow::anyhow!(

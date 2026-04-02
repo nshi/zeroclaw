@@ -145,7 +145,13 @@ pub(crate) fn filter_by_allowed_tools(
 ) -> Vec<crate::tools::ToolSpec> {
     match allowed {
         None => specs,
-        Some(list) if list.iter().any(|n| n == crate::tools::ALLOWED_TOOLS_WILDCARD) => specs,
+        Some(list)
+            if list
+                .iter()
+                .any(|n| n == crate::tools::ALLOWED_TOOLS_WILDCARD) =>
+        {
+            specs
+        }
         Some(list) => specs
             .into_iter()
             .filter(|spec| list.iter().any(|name| name == &spec.name))
@@ -1857,10 +1863,33 @@ fn detect_tool_call_parse_issue(response: &str, parsed_calls: &[ParsedToolCall])
 /// Build assistant history entry in JSON format for native tool-call APIs.
 /// `convert_messages` in the OpenRouter provider parses this JSON to reconstruct
 /// the proper `NativeMessage` with structured `tool_calls`.
+/// Insert optional reasoning_content and provider_attrs into an assistant
+/// history JSON object.
+fn insert_optional_attrs(
+    obj: &mut serde_json::Value,
+    reasoning_content: Option<&str>,
+    provider_attrs: Option<&serde_json::Map<String, serde_json::Value>>,
+) {
+    let map = obj.as_object_mut().unwrap();
+    if let Some(rc) = reasoning_content {
+        map.insert(
+            "reasoning_content".to_string(),
+            serde_json::Value::String(rc.to_string()),
+        );
+    }
+    if let Some(attrs) = provider_attrs {
+        map.insert(
+            "provider_attrs".to_string(),
+            serde_json::Value::Object(attrs.clone()),
+        );
+    }
+}
+
 fn build_native_assistant_history(
     text: &str,
     tool_calls: &[ToolCall],
     reasoning_content: Option<&str>,
+    provider_attrs: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> String {
     let calls_json: Vec<serde_json::Value> = tool_calls
         .iter()
@@ -1884,12 +1913,7 @@ fn build_native_assistant_history(
         "tool_calls": calls_json,
     });
 
-    if let Some(rc) = reasoning_content {
-        obj.as_object_mut().unwrap().insert(
-            "reasoning_content".to_string(),
-            serde_json::Value::String(rc.to_string()),
-        );
-    }
+    insert_optional_attrs(&mut obj, reasoning_content, provider_attrs);
 
     obj.to_string()
 }
@@ -1898,6 +1922,7 @@ fn build_native_assistant_history_from_parsed_calls(
     text: &str,
     tool_calls: &[ParsedToolCall],
     reasoning_content: Option<&str>,
+    provider_attrs: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<String> {
     let calls_json = tool_calls
         .iter()
@@ -1921,12 +1946,7 @@ fn build_native_assistant_history_from_parsed_calls(
         "tool_calls": calls_json,
     });
 
-    if let Some(rc) = reasoning_content {
-        obj.as_object_mut().unwrap().insert(
-            "reasoning_content".to_string(),
-            serde_json::Value::String(rc.to_string()),
-        );
-    }
+    insert_optional_attrs(&mut obj, reasoning_content, provider_attrs);
 
     Some(obj.to_string())
 }
@@ -2562,6 +2582,7 @@ pub(crate) async fn run_tool_call_loop(
                         tool_calls: streamed.tool_calls,
                         usage: None,
                         reasoning_content: None,
+                        provider_attrs: None,
                     })
                 }
                 Err(stream_err) => {
@@ -2758,12 +2779,14 @@ pub(crate) async fn run_tool_call_loop(
                 // Preserve native tool call IDs in assistant history so role=tool
                 // follow-up messages can reference the exact call id.
                 let reasoning_content = resp.reasoning_content.clone();
+                let provider_attrs = resp.provider_attrs.clone();
                 let assistant_history_content = if resp.tool_calls.is_empty() {
                     if use_native_tools {
                         build_native_assistant_history_from_parsed_calls(
                             &response_text,
                             &calls,
                             reasoning_content.as_deref(),
+                            provider_attrs.as_ref(),
                         )
                         .unwrap_or_else(|| response_text.clone())
                     } else {
@@ -2774,6 +2797,7 @@ pub(crate) async fn run_tool_call_loop(
                         &response_text,
                         &resp.tool_calls,
                         reasoning_content.as_deref(),
+                        provider_attrs.as_ref(),
                     )
                 };
 
@@ -3556,7 +3580,10 @@ pub async fn run(
     // those tools whose name appears in the list. Unknown names are silently
     // ignored. When `None`, all tools remain available (backward compatible).
     if let Some(ref allow_list) = allowed_tools {
-        if !allow_list.iter().any(|n| n == crate::tools::ALLOWED_TOOLS_WILDCARD) {
+        if !allow_list
+            .iter()
+            .any(|n| n == crate::tools::ALLOWED_TOOLS_WILDCARD)
+        {
             tools_registry.retain(|t| allow_list.iter().any(|name| name == t.name()));
         }
         tracing::info!(
@@ -5225,6 +5252,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 usage: None,
                 reasoning_content: None,
+                provider_attrs: None,
             })
         }
     }
@@ -5243,6 +5271,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 })
                 .collect();
             Self {
@@ -6868,12 +6897,14 @@ mod tests {
                     }],
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 },
                 ChatResponse {
                     text: Some("Final answer".into()),
                     tool_calls: Vec::new(),
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 },
             ]))),
             capabilities: ProviderCapabilities {
@@ -8998,7 +9029,7 @@ Let me check the result."#;
             name: "shell".into(),
             arguments: "{}".into(),
         }];
-        let result = build_native_assistant_history("answer", &calls, Some("thinking step"));
+        let result = build_native_assistant_history("answer", &calls, Some("thinking step"), None);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["content"].as_str(), Some("answer"));
         assert_eq!(parsed["reasoning_content"].as_str(), Some("thinking step"));
@@ -9012,7 +9043,7 @@ Let me check the result."#;
             name: "shell".into(),
             arguments: "{}".into(),
         }];
-        let result = build_native_assistant_history("answer", &calls, None);
+        let result = build_native_assistant_history("answer", &calls, None, None);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["content"].as_str(), Some("answer"));
         assert!(parsed.get("reasoning_content").is_none());
@@ -9029,6 +9060,7 @@ Let me check the result."#;
             "answer",
             &calls,
             Some("deep thought"),
+            None,
         );
         assert!(result.is_some());
         let parsed: serde_json::Value = serde_json::from_str(result.as_deref().unwrap()).unwrap();
@@ -9044,7 +9076,7 @@ Let me check the result."#;
             arguments: serde_json::json!({"command": "pwd"}),
             tool_call_id: Some("call_2".into()),
         }];
-        let result = build_native_assistant_history_from_parsed_calls("answer", &calls, None);
+        let result = build_native_assistant_history_from_parsed_calls("answer", &calls, None, None);
         assert!(result.is_some());
         let parsed: serde_json::Value = serde_json::from_str(result.as_deref().unwrap()).unwrap();
         assert_eq!(parsed["content"].as_str(), Some("answer"));
@@ -9353,6 +9385,7 @@ Let me check the result."#;
                     cached_input_tokens: None,
                 }),
                 reasoning_content: None,
+                provider_attrs: None,
             }]))),
             capabilities: ProviderCapabilities::default(),
         };
@@ -9513,6 +9546,7 @@ Let me check the result."#;
                     cached_input_tokens: None,
                 }),
                 reasoning_content: None,
+                provider_attrs: None,
             }]))),
             capabilities: ProviderCapabilities::default(),
         };

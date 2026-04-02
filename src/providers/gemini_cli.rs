@@ -227,6 +227,7 @@ impl Provider for GeminiCliProvider {
             tool_calls: Vec::new(),
             usage: Some(TokenUsage::default()),
             reasoning_content: None,
+            provider_attrs: None,
         })
     }
 }

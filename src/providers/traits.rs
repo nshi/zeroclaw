@@ -73,6 +73,12 @@ pub struct ChatResponse {
     /// sent back in subsequent API requests — some providers reject tool-call
     /// history that omits this field.
     pub reasoning_content: Option<String>,
+    /// Opaque provider-specific attributes that must be round-tripped through
+    /// conversation history without interpretation by the agent loop. Each
+    /// provider decides what to store here; for example, the OpenRouter adapter
+    /// uses this to carry `reasoning_details` (Gemini thought signatures) that
+    /// must be sent back verbatim on subsequent requests.
+    pub provider_attrs: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl ChatResponse {
@@ -114,6 +120,8 @@ pub enum ConversationMessage {
         /// Raw reasoning content from thinking models, preserved for round-trip
         /// fidelity with provider APIs that require it.
         reasoning_content: Option<String>,
+        /// Opaque provider-specific attributes, round-tripped through history.
+        provider_attrs: Option<serde_json::Map<String, serde_json::Value>>,
     },
     /// Results of tool executions, fed back to the LLM.
     ToolResults(Vec<ToolResultMessage>),
@@ -413,6 +421,7 @@ pub trait Provider: Send + Sync {
                     tool_calls: Vec::new(),
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 });
             }
         }
@@ -425,6 +434,7 @@ pub trait Provider: Send + Sync {
             tool_calls: Vec::new(),
             usage: None,
             reasoning_content: None,
+            provider_attrs: None,
         })
     }
 
@@ -460,6 +470,7 @@ pub trait Provider: Send + Sync {
             tool_calls: Vec::new(),
             usage: None,
             reasoning_content: None,
+            provider_attrs: None,
         })
     }
 
@@ -617,6 +628,7 @@ mod tests {
             tool_calls: vec![],
             usage: None,
             reasoning_content: None,
+            provider_attrs: None,
         };
         assert!(!empty.has_tool_calls());
         assert_eq!(empty.text_or_empty(), "");
@@ -630,6 +642,7 @@ mod tests {
             }],
             usage: None,
             reasoning_content: None,
+            provider_attrs: None,
         };
         assert!(with_tools.has_tool_calls());
         assert_eq!(with_tools.text_or_empty(), "Let me check");
@@ -653,6 +666,7 @@ mod tests {
                 cached_input_tokens: None,
             }),
             reasoning_content: None,
+            provider_attrs: None,
         };
         assert_eq!(resp.usage.as_ref().unwrap().input_tokens, Some(100));
         assert_eq!(resp.usage.as_ref().unwrap().output_tokens, Some(50));
