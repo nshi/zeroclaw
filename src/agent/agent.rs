@@ -274,7 +274,10 @@ impl AgentBuilder {
             .ok_or_else(|| anyhow::anyhow!("tools are required"))?;
         let allowed = self.allowed_tools.clone();
         if let Some(ref allow_list) = allowed {
-            if !allow_list.iter().any(|n| n == crate::tools::ALLOWED_TOOLS_WILDCARD) {
+            if !allow_list
+                .iter()
+                .any(|n| n == crate::tools::ALLOWED_TOOLS_WILDCARD)
+            {
                 tools.retain(|t| allow_list.iter().any(|name| name == t.name()));
             }
         }
@@ -877,6 +880,7 @@ impl Agent {
                 text: response.text.clone(),
                 tool_calls: response.tool_calls.clone(),
                 reasoning_content: response.reasoning_content.clone(),
+                provider_attrs: None,
             });
 
             let results = self.execute_tools(&calls).await;
@@ -1073,6 +1077,7 @@ impl Agent {
                     tool_calls: streamed_tool_calls,
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 }
             } else {
                 // Fall back to non-streaming chat
@@ -1146,6 +1151,7 @@ impl Agent {
                 text: response.text.clone(),
                 tool_calls: response.tool_calls.clone(),
                 reasoning_content: response.reasoning_content.clone(),
+                provider_attrs: None,
             });
 
             // Notify about each tool call
@@ -1302,6 +1308,7 @@ mod tests {
                     tool_calls: vec![],
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 });
             }
             Ok(guard.remove(0))
@@ -1339,6 +1346,7 @@ mod tests {
                     tool_calls: vec![],
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 });
             }
             Ok(guard.remove(0))
@@ -1378,6 +1386,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
                 reasoning_content: None,
+                provider_attrs: None,
             }]),
         });
 
@@ -1418,12 +1427,14 @@ mod tests {
                     }],
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 },
                 crate::providers::ChatResponse {
                     text: Some("done".into()),
                     tool_calls: vec![],
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 },
             ]),
         });
@@ -1467,6 +1478,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
                 reasoning_content: None,
+                provider_attrs: None,
             }]),
             seen_models: seen_models.clone(),
         });
@@ -1748,6 +1760,7 @@ mod tests {
                     }],
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 })
             } else {
                 Ok(crate::providers::ChatResponse {
@@ -1755,6 +1768,7 @@ mod tests {
                     tool_calls: vec![],
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 })
             }
         }

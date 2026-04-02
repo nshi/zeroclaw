@@ -1113,7 +1113,10 @@ impl DelegateTool {
         if let Some(system_prompt) = enriched_system_prompt.as_ref() {
             history.push(ChatMessage::system(system_prompt.clone()));
         }
-        history.push(ChatMessage::user(crate::agent::prompt::timestamp_prefix(full_prompt, None)));
+        history.push(ChatMessage::user(crate::agent::prompt::timestamp_prefix(
+            full_prompt,
+            None,
+        )));
 
         let noop_observer = NoopObserver;
 
@@ -1347,6 +1350,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 })
             } else {
                 Ok(ChatResponse {
@@ -1358,6 +1362,7 @@ mod tests {
                     }],
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 })
             }
         }
@@ -1392,6 +1397,7 @@ mod tests {
                 }],
                 usage: None,
                 reasoning_content: None,
+                provider_attrs: None,
             })
         }
     }
@@ -1954,6 +1960,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 })
             } else {
                 Ok(ChatResponse {
@@ -1965,6 +1972,7 @@ mod tests {
                     }],
                     usage: None,
                     reasoning_content: None,
+                    provider_attrs: None,
                 })
             }
         }

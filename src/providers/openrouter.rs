@@ -98,6 +98,11 @@ struct NativeMessage {
     /// that require it in assistant tool-call history messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
+    /// Structured reasoning details from OpenRouter (e.g. Gemini thought
+    /// signatures). Must be passed back verbatim so the upstream provider can
+    /// validate reasoning integrity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_details: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -164,6 +169,10 @@ struct NativeResponseMessage {
     /// Reasoning/thinking models may return output in `reasoning_content`.
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// Structured reasoning details (e.g. Gemini thought signatures) returned
+    /// by OpenRouter for thinking models. Must be round-tripped verbatim.
+    #[serde(default)]
+    reasoning_details: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     tool_calls: Option<Vec<NativeToolCall>>,
 }
@@ -263,12 +272,18 @@ impl OpenRouterProvider {
                                         .get("reasoning_content")
                                         .and_then(serde_json::Value::as_str)
                                         .map(ToString::to_string);
+                                    let reasoning_details = value
+                                        .get("provider_attrs")
+                                        .and_then(|attrs| attrs.get("reasoning_details"))
+                                        .and_then(serde_json::Value::as_array)
+                                        .cloned();
                                     return NativeMessage {
                                         role: "assistant".to_string(),
                                         content,
                                         tool_call_id: None,
                                         tool_calls: Some(tool_calls),
                                         reasoning_content,
+                                        reasoning_details,
                                     };
                                 }
                             }
@@ -292,6 +307,7 @@ impl OpenRouterProvider {
                                 tool_call_id,
                                 tool_calls: None,
                                 reasoning_content: None,
+                                reasoning_details: None,
                             };
                         }
                     }
@@ -302,6 +318,7 @@ impl OpenRouterProvider {
                         tool_call_id: None,
                         tool_calls: None,
                         reasoning_content: None,
+                        reasoning_details: None,
                     }
                 })
             .collect()
@@ -336,6 +353,14 @@ impl OpenRouterProvider {
 
     fn parse_native_response(message: NativeResponseMessage) -> ProviderChatResponse {
         let reasoning_content = message.reasoning_content.clone();
+        let provider_attrs = message.reasoning_details.as_ref().map(|rd| {
+            let mut attrs = serde_json::Map::new();
+            attrs.insert(
+                "reasoning_details".to_string(),
+                serde_json::Value::Array(rd.clone()),
+            );
+            attrs
+        });
         let tool_calls = message
             .tool_calls
             .unwrap_or_default()
@@ -352,6 +377,7 @@ impl OpenRouterProvider {
             tool_calls,
             usage: None,
             reasoning_content,
+            provider_attrs,
         }
     }
 
@@ -954,6 +980,7 @@ mod tests {
         let message = NativeResponseMessage {
             content: Some("Here you go.".into()),
             reasoning_content: None,
+            reasoning_details: None,
             tool_calls: Some(vec![NativeToolCall {
                 id: Some("call_789".into()),
                 kind: Some("function".into()),
@@ -1068,6 +1095,7 @@ mod tests {
         let message = NativeResponseMessage {
             content: Some("answer".into()),
             reasoning_content: Some("thinking step".into()),
+            reasoning_details: None,
             tool_calls: Some(vec![NativeToolCall {
                 id: Some("call_1".into()),
                 kind: Some("function".into()),
@@ -1087,6 +1115,7 @@ mod tests {
         let message = NativeResponseMessage {
             content: Some("hello".into()),
             reasoning_content: None,
+            reasoning_details: None,
             tool_calls: None,
         };
         let parsed = OpenRouterProvider::parse_native_response(message);
@@ -1163,6 +1192,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             reasoning_content: None,
+            reasoning_details: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("reasoning_content"));
@@ -1176,10 +1206,152 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             reasoning_content: Some("thinking...".to_string()),
+            reasoning_details: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("reasoning_content"));
         assert!(json.contains("thinking..."));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // reasoning_details (Gemini thought signatures) round-trip tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn native_response_deserializes_reasoning_details() {
+        let json = r#"{
+            "choices":[{
+                "message":{
+                    "content":"answer",
+                    "reasoning_content":"thinking...",
+                    "reasoning_details":[
+                        {"type":"text","text":"step 1"},
+                        {"type":"signature","signature":"abc123"}
+                    ]
+                }
+            }]
+        }"#;
+        let resp: NativeChatResponse = serde_json::from_str(json).unwrap();
+        let msg = &resp.choices[0].message;
+        let rd = msg.reasoning_details.as_ref().unwrap();
+        assert_eq!(rd.len(), 2);
+        assert_eq!(rd[1]["signature"].as_str(), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_native_response_stores_reasoning_details_in_provider_attrs() {
+        let message = NativeResponseMessage {
+            content: Some("answer".into()),
+            reasoning_content: Some("thinking".into()),
+            reasoning_details: Some(vec![
+                serde_json::json!({"type": "text", "text": "step 1"}),
+                serde_json::json!({"type": "signature", "signature": "sig123"}),
+            ]),
+            tool_calls: None,
+        };
+        let parsed = OpenRouterProvider::parse_native_response(message);
+        let attrs = parsed.provider_attrs.as_ref().unwrap();
+        let rd = attrs.get("reasoning_details").unwrap().as_array().unwrap();
+        assert_eq!(rd.len(), 2);
+        assert_eq!(rd[1]["signature"].as_str(), Some("sig123"));
+    }
+
+    #[test]
+    fn parse_native_response_no_provider_attrs_without_reasoning_details() {
+        let message = NativeResponseMessage {
+            content: Some("hello".into()),
+            reasoning_content: None,
+            reasoning_details: None,
+            tool_calls: None,
+        };
+        let parsed = OpenRouterProvider::parse_native_response(message);
+        assert!(parsed.provider_attrs.is_none());
+    }
+
+    #[test]
+    fn convert_messages_round_trips_reasoning_details_via_provider_attrs() {
+        let history_json = serde_json::json!({
+            "content": "I will check",
+            "tool_calls": [{
+                "id": "tc_1",
+                "name": "shell",
+                "arguments": "{}"
+            }],
+            "reasoning_content": "thinking...",
+            "provider_attrs": {
+                "reasoning_details": [
+                    {"type": "text", "text": "step 1"},
+                    {"type": "signature", "signature": "sig456"}
+                ]
+            }
+        });
+
+        let messages = vec![ChatMessage {
+            role: "assistant".into(),
+            content: history_json.to_string(),
+        }];
+        let native = OpenRouterProvider::convert_messages(&messages);
+        assert_eq!(native.len(), 1);
+
+        let rd = native[0].reasoning_details.as_ref().unwrap();
+        assert_eq!(rd.len(), 2);
+        assert_eq!(rd[1]["signature"].as_str(), Some("sig456"));
+
+        // Also verify it serializes back into the outgoing request
+        let json = serde_json::to_string(&native[0]).unwrap();
+        assert!(json.contains("reasoning_details"));
+        assert!(json.contains("sig456"));
+    }
+
+    #[test]
+    fn convert_messages_no_reasoning_details_when_provider_attrs_absent() {
+        let history_json = serde_json::json!({
+            "content": "I will check",
+            "tool_calls": [{
+                "id": "tc_1",
+                "name": "shell",
+                "arguments": "{}"
+            }]
+        });
+
+        let messages = vec![ChatMessage {
+            role: "assistant".into(),
+            content: history_json.to_string(),
+        }];
+        let native = OpenRouterProvider::convert_messages(&messages);
+        assert_eq!(native.len(), 1);
+        assert!(native[0].reasoning_details.is_none());
+    }
+
+    #[test]
+    fn native_message_serializes_reasoning_details() {
+        let msg = NativeMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::Text("hi".into())),
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning_content: Some("thinking".to_string()),
+            reasoning_details: Some(vec![
+                serde_json::json!({"type": "signature", "signature": "abc"}),
+            ]),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("reasoning_details"));
+        assert!(json.contains("abc"));
+    }
+
+    #[test]
+    fn native_message_omits_reasoning_details_when_none() {
+        let msg = NativeMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::Text("hi".into())),
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning_content: None,
+            reasoning_details: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("reasoning_details"));
     }
 
     // ═══════════════════════════════════════════════════════════════════════

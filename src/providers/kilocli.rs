@@ -229,6 +229,7 @@ impl Provider for KiloCliProvider {
             tool_calls: Vec::new(),
             usage: Some(TokenUsage::default()),
             reasoning_content: None,
+            provider_attrs: None,
         })
     }
 }

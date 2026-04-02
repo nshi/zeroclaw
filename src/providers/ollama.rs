@@ -797,6 +797,7 @@ impl Provider for OllamaProvider {
                 tool_calls,
                 usage,
                 reasoning_content: None,
+                provider_attrs: None,
             });
         }
 
@@ -821,6 +822,7 @@ impl Provider for OllamaProvider {
             tool_calls: vec![],
             usage,
             reasoning_content: None,
+            provider_attrs: None,
         })
     }
 
@@ -871,6 +873,7 @@ impl Provider for OllamaProvider {
             tool_calls: vec![],
             usage: None,
             reasoning_content: None,
+            provider_attrs: None,
         })
     }
 }

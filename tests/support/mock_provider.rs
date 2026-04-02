@@ -51,6 +51,7 @@ impl Provider for MockProvider {
                 tool_calls: vec![],
                 usage: None,
                 reasoning_content: None,
+                provider_attrs: None,
             });
         }
         Ok(guard.remove(0))
@@ -104,6 +105,7 @@ impl Provider for RecordingProvider {
                 tool_calls: vec![],
                 usage: None,
                 reasoning_content: None,
+                provider_attrs: None,
             });
         }
         Ok(guard.remove(0))
@@ -174,6 +176,7 @@ impl Provider for TraceLlmProvider {
                     cached_input_tokens: None,
                 }),
                 reasoning_content: None,
+                provider_attrs: None,
             }),
             TraceResponse::ToolCalls {
                 tool_calls,
@@ -197,6 +200,7 @@ impl Provider for TraceLlmProvider {
                         cached_input_tokens: None,
                     }),
                     reasoning_content: None,
+                    provider_attrs: None,
                 })
             }
         }

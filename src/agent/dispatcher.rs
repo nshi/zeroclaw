@@ -59,7 +59,8 @@ impl XmlToolDispatcher {
                             if parsed.get("command").is_some() {
                                 name = "shell".to_string();
                                 parsed.clone()
-                            } else if parsed.get("path").is_some() && parsed.get("content").is_some()
+                            } else if parsed.get("path").is_some()
+                                && parsed.get("content").is_some()
                             {
                                 name = "file_write".to_string();
                                 parsed.clone()
@@ -235,6 +236,7 @@ impl ToolDispatcher for NativeToolDispatcher {
                     text,
                     tool_calls,
                     reasoning_content,
+                    provider_attrs,
                 } => {
                     let mut payload = serde_json::json!({
                         "content": text,
@@ -242,6 +244,9 @@ impl ToolDispatcher for NativeToolDispatcher {
                     });
                     if let Some(rc) = reasoning_content {
                         payload["reasoning_content"] = serde_json::json!(rc);
+                    }
+                    if let Some(attrs) = provider_attrs {
+                        payload["provider_attrs"] = serde_json::Value::Object(attrs.clone());
                     }
                     vec![ChatMessage::assistant(payload.to_string())]
                 }
@@ -273,19 +278,20 @@ mod tests {
     #[test]
     fn xml_dispatcher_handles_nameless_tool_call() {
         let response = ChatResponse {
-            text: Some(
-                "Checking\n<tool_call>{\"command\":\"ls\"}</tool_call>"
-                    .into(),
-            ),
+            text: Some("Checking\n<tool_call>{\"command\":\"ls\"}</tool_call>".into()),
             tool_calls: vec![],
             usage: None,
             reasoning_content: None,
+            provider_attrs: None,
         };
         let dispatcher = XmlToolDispatcher;
         let (_, calls) = dispatcher.parse_response(&response);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "shell");
-        assert_eq!(calls[0].arguments.get("command").unwrap().as_str().unwrap(), "ls");
+        assert_eq!(
+            calls[0].arguments.get("command").unwrap().as_str().unwrap(),
+            "ls"
+        );
     }
 
     #[test]
@@ -298,6 +304,7 @@ mod tests {
             tool_calls: vec![],
             usage: None,
             reasoning_content: None,
+            provider_attrs: None,
         };
         let dispatcher = XmlToolDispatcher;
         let (_, calls) = dispatcher.parse_response(&response);
@@ -315,6 +322,7 @@ mod tests {
             tool_calls: vec![],
             usage: None,
             reasoning_content: None,
+            provider_attrs: None,
         };
         let dispatcher = XmlToolDispatcher;
         let (text, calls) = dispatcher.parse_response(&response);
@@ -333,6 +341,7 @@ mod tests {
             tool_calls: vec![],
             usage: None,
             reasoning_content: None,
+            provider_attrs: None,
         };
         let dispatcher = XmlToolDispatcher;
         let (_, calls) = dispatcher.parse_response(&response);
@@ -350,6 +359,7 @@ mod tests {
             }],
             usage: None,
             reasoning_content: None,
+            provider_attrs: None,
         };
         let dispatcher = NativeToolDispatcher;
         let (_, calls) = dispatcher.parse_response(&response);
@@ -422,6 +432,7 @@ mod tests {
                 arguments: "{}".into(),
             }],
             reasoning_content: Some("thinking step".into()),
+            provider_attrs: None,
         }];
 
         let messages = dispatcher.to_provider_messages(&history);
@@ -445,6 +456,7 @@ mod tests {
                 arguments: "{}".into(),
             }],
             reasoning_content: None,
+            provider_attrs: None,
         }];
 
         let messages = dispatcher.to_provider_messages(&history);
@@ -465,6 +477,7 @@ mod tests {
                 arguments: "{}".into(),
             }],
             reasoning_content: Some("should be ignored".into()),
+            provider_attrs: None,
         }];
 
         let messages = dispatcher.to_provider_messages(&history);
