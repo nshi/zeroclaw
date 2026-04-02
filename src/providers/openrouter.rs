@@ -352,12 +352,12 @@ impl OpenRouterProvider {
     }
 
     fn parse_native_response(message: NativeResponseMessage) -> ProviderChatResponse {
-        let reasoning_content = message.reasoning_content.clone();
-        let provider_attrs = message.reasoning_details.as_ref().map(|rd| {
+        let reasoning_content = message.reasoning_content;
+        let provider_attrs = message.reasoning_details.map(|rd| {
             let mut attrs = serde_json::Map::new();
             attrs.insert(
                 "reasoning_details".to_string(),
-                serde_json::Value::Array(rd.clone()),
+                serde_json::Value::Array(rd),
             );
             attrs
         });

@@ -1863,6 +1863,28 @@ fn detect_tool_call_parse_issue(response: &str, parsed_calls: &[ParsedToolCall])
 /// Build assistant history entry in JSON format for native tool-call APIs.
 /// `convert_messages` in the OpenRouter provider parses this JSON to reconstruct
 /// the proper `NativeMessage` with structured `tool_calls`.
+/// Insert optional reasoning_content and provider_attrs into an assistant
+/// history JSON object.
+fn insert_optional_attrs(
+    obj: &mut serde_json::Value,
+    reasoning_content: Option<&str>,
+    provider_attrs: Option<&serde_json::Map<String, serde_json::Value>>,
+) {
+    let map = obj.as_object_mut().unwrap();
+    if let Some(rc) = reasoning_content {
+        map.insert(
+            "reasoning_content".to_string(),
+            serde_json::Value::String(rc.to_string()),
+        );
+    }
+    if let Some(attrs) = provider_attrs {
+        map.insert(
+            "provider_attrs".to_string(),
+            serde_json::Value::Object(attrs.clone()),
+        );
+    }
+}
+
 fn build_native_assistant_history(
     text: &str,
     tool_calls: &[ToolCall],
@@ -1891,18 +1913,7 @@ fn build_native_assistant_history(
         "tool_calls": calls_json,
     });
 
-    if let Some(rc) = reasoning_content {
-        obj.as_object_mut().unwrap().insert(
-            "reasoning_content".to_string(),
-            serde_json::Value::String(rc.to_string()),
-        );
-    }
-    if let Some(attrs) = provider_attrs {
-        obj.as_object_mut().unwrap().insert(
-            "provider_attrs".to_string(),
-            serde_json::Value::Object(attrs.clone()),
-        );
-    }
+    insert_optional_attrs(&mut obj, reasoning_content, provider_attrs);
 
     obj.to_string()
 }
@@ -1935,18 +1946,7 @@ fn build_native_assistant_history_from_parsed_calls(
         "tool_calls": calls_json,
     });
 
-    if let Some(rc) = reasoning_content {
-        obj.as_object_mut().unwrap().insert(
-            "reasoning_content".to_string(),
-            serde_json::Value::String(rc.to_string()),
-        );
-    }
-    if let Some(attrs) = provider_attrs {
-        obj.as_object_mut().unwrap().insert(
-            "provider_attrs".to_string(),
-            serde_json::Value::Object(attrs.clone()),
-        );
-    }
+    insert_optional_attrs(&mut obj, reasoning_content, provider_attrs);
 
     Some(obj.to_string())
 }

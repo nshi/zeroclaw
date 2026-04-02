@@ -880,7 +880,7 @@ impl Agent {
                 text: response.text.clone(),
                 tool_calls: response.tool_calls.clone(),
                 reasoning_content: response.reasoning_content.clone(),
-                provider_attrs: None,
+                provider_attrs: response.provider_attrs.clone(),
             });
 
             let results = self.execute_tools(&calls).await;
@@ -1151,7 +1151,7 @@ impl Agent {
                 text: response.text.clone(),
                 tool_calls: response.tool_calls.clone(),
                 reasoning_content: response.reasoning_content.clone(),
-                provider_attrs: None,
+                provider_attrs: response.provider_attrs.clone(),
             });
 
             // Notify about each tool call
