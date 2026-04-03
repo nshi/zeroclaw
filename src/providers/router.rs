@@ -196,6 +196,12 @@ impl CostOptimizedStrategy {
 
 #[async_trait]
 impl Provider for RouterProvider {
+    fn set_session_id(&self, id: Option<&str>) {
+        for (_name, provider) in &self.providers {
+            provider.set_session_id(id);
+        }
+    }
+
     async fn chat_with_system(
         &self,
         system_prompt: Option<&str>,

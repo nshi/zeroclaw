@@ -448,6 +448,9 @@ pub trait Provider: Send + Sync {
         self.capabilities().vision
     }
 
+    /// Attach a session ID for request grouping (e.g. OpenRouter log grouping).
+    fn set_session_id(&self, _id: Option<&str>) {}
+
     /// Warm up the HTTP connection pool (TLS handshake, DNS, HTTP/2 setup).
     /// Default implementation is a no-op; providers with HTTP clients should override.
     async fn warmup(&self) -> anyhow::Result<()> {

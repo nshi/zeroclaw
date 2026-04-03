@@ -2527,7 +2527,10 @@ async fn process_channel_message(
     )
     .await
     {
-        Ok(provider) => provider,
+        Ok(provider) => {
+            provider.set_session_id(Some(&history_key));
+            provider
+        }
         Err(err) => {
             let safe_err = providers::sanitize_api_error(&err.to_string());
             let message = format!(

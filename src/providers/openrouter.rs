@@ -13,6 +13,7 @@ pub struct OpenRouterProvider {
     credential: Option<String>,
     timeout_secs: u64,
     max_tokens: Option<u32>,
+    session_id: parking_lot::RwLock<Option<String>>,
 }
 
 const DEFAULT_OPENROUTER_TIMEOUT_SECS: u64 = 120;
@@ -25,6 +26,8 @@ struct ChatRequest {
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,6 +86,8 @@ struct NativeChatRequest {
     /// cacheable block, removing the need for manual per-block annotations.
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,6 +211,7 @@ impl OpenRouterProvider {
                 .filter(|secs| *secs > 0)
                 .unwrap_or(DEFAULT_OPENROUTER_TIMEOUT_SECS),
             max_tokens: None,
+            session_id: parking_lot::RwLock::new(None),
         }
     }
 
@@ -428,6 +434,10 @@ impl OpenRouterProvider {
             OPENROUTER_CONNECT_TIMEOUT_SECS,
         )
     }
+
+    fn session_id(&self) -> Option<String> {
+        self.session_id.read().clone()
+    }
 }
 
 #[async_trait]
@@ -438,6 +448,11 @@ impl Provider for OpenRouterProvider {
             vision: true,
             prompt_caching: false,
         }
+    }
+
+    fn set_session_id(&self, id: Option<&str>) {
+        tracing::trace!(session_id = ?id, "OpenRouter session_id set");
+        *self.session_id.write() = id.map(ToString::to_string);
     }
 
     async fn warmup(&self) -> anyhow::Result<()> {
@@ -478,11 +493,14 @@ impl Provider for OpenRouterProvider {
             content: Self::to_message_content("user", message),
         });
 
+        let session_id = self.session_id();
+        tracing::debug!(model, session_id = ?session_id, "OpenRouter chat_with_system request");
         let request = ChatRequest {
             model: model.to_string(),
             messages,
             temperature,
             max_tokens: self.max_tokens,
+            session_id,
         };
 
         let response = self
@@ -528,11 +546,14 @@ impl Provider for OpenRouterProvider {
             })
             .collect();
 
+        let session_id = self.session_id();
+        tracing::debug!(model, session_id = ?session_id, "OpenRouter chat_with_history request");
         let request = ChatRequest {
             model: model.to_string(),
             messages: api_messages,
             temperature,
             max_tokens: self.max_tokens,
+            session_id,
         };
 
         let response = self
@@ -574,6 +595,8 @@ impl Provider for OpenRouterProvider {
         })?;
 
         let tools = Self::convert_tools(request.tools);
+        let session_id = self.session_id();
+        tracing::debug!(model, session_id = ?session_id, "OpenRouter chat request");
         let native_request = NativeChatRequest {
             model: model.to_string(),
             messages: Self::convert_messages(request.messages),
@@ -582,6 +605,7 @@ impl Provider for OpenRouterProvider {
             tools,
             max_tokens: self.max_tokens,
             cache_control: is_anthropic_model(model).then(CacheControl::ephemeral),
+            session_id,
         };
 
         let response = self
@@ -662,6 +686,8 @@ impl Provider for OpenRouterProvider {
         // when history contains native tool-call metadata.
         let native_messages = Self::convert_messages(messages);
 
+        let session_id = self.session_id();
+        tracing::debug!(model, session_id = ?session_id, "OpenRouter chat_with_tools request");
         let native_request = NativeChatRequest {
             model: model.to_string(),
             messages: native_messages,
@@ -670,6 +696,7 @@ impl Provider for OpenRouterProvider {
             tools: native_tools,
             max_tokens: self.max_tokens,
             cache_control: is_anthropic_model(model).then(CacheControl::ephemeral),
+            session_id,
         };
 
         let response = self
@@ -808,6 +835,7 @@ mod tests {
             ],
             temperature: 0.5,
             max_tokens: None,
+            session_id: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -842,6 +870,7 @@ mod tests {
                 .collect(),
             temperature: 0.0,
             max_tokens: None,
+            session_id: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -1492,6 +1521,7 @@ mod tests {
             max_tokens: None,
             cache_control: is_anthropic_model("anthropic/claude-sonnet-4-20250514")
                 .then(CacheControl::ephemeral),
+            session_id: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains(r#""cache_control":{"type":"ephemeral"}"#));
@@ -1507,6 +1537,7 @@ mod tests {
             tool_choice: None,
             max_tokens: None,
             cache_control: is_anthropic_model("openai/gpt-4o").then(CacheControl::ephemeral),
+            session_id: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(!json.contains("cache_control"));
@@ -1517,5 +1548,53 @@ mod tests {
         let cc = CacheControl::ephemeral();
         let json = serde_json::to_string(&cc).unwrap();
         assert_eq!(json, r#"{"type":"ephemeral"}"#);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // session_id for OpenRouter request grouping
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn session_id_included_in_request_when_set() {
+        let request = NativeChatRequest {
+            model: "anthropic/claude-sonnet-4-20250514".into(),
+            messages: vec![],
+            temperature: 0.5,
+            tools: None,
+            tool_choice: None,
+            max_tokens: None,
+            cache_control: None,
+            session_id: Some("test-session-42".into()),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""session_id":"test-session-42""#));
+    }
+
+    #[test]
+    fn session_id_omitted_from_request_when_none() {
+        let request = NativeChatRequest {
+            model: "openai/gpt-4o".into(),
+            messages: vec![],
+            temperature: 0.5,
+            tools: None,
+            tool_choice: None,
+            max_tokens: None,
+            cache_control: None,
+            session_id: None,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("session_id"));
+    }
+
+    #[test]
+    fn set_session_id_updates_provider_state() {
+        let provider = OpenRouterProvider::new(Some("test-key"), None);
+        assert!(provider.session_id().is_none());
+
+        provider.set_session_id(Some("my-session"));
+        assert_eq!(provider.session_id().as_deref(), Some("my-session"));
+
+        provider.set_session_id(None);
+        assert!(provider.session_id().is_none());
     }
 }

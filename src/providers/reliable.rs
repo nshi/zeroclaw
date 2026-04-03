@@ -406,6 +406,12 @@ impl ReliableProvider {
 
 #[async_trait]
 impl Provider for ReliableProvider {
+    fn set_session_id(&self, id: Option<&str>) {
+        for (_name, provider) in &self.providers {
+            provider.set_session_id(id);
+        }
+    }
+
     async fn warmup(&self) -> anyhow::Result<()> {
         for (name, provider) in &self.providers {
             tracing::info!(provider = name, "Warming up provider connection pool");

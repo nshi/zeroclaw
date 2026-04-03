@@ -3688,15 +3688,22 @@ pub async fn run(
 
     let provider_runtime_options = providers::provider_runtime_options_from_config(&config);
 
-    let mut provider: Box<dyn Provider> = providers::create_routed_provider_with_options(
-        &provider_name,
-        config.api_key.as_deref(),
-        config.api_url.as_deref(),
-        &config.reliability,
-        &config.model_routes,
-        &model_name,
-        &provider_runtime_options,
-    )?;
+    let run_session_id = uuid::Uuid::new_v4().to_string();
+    let create_provider =
+        |name: &str, model: &str| -> anyhow::Result<Box<dyn Provider>> {
+            let p = providers::create_routed_provider_with_options(
+                name,
+                config.api_key.as_deref(),
+                config.api_url.as_deref(),
+                &config.reliability,
+                &config.model_routes,
+                model,
+                &provider_runtime_options,
+            )?;
+            p.set_session_id(Some(&run_session_id));
+            Ok(p)
+        };
+    let mut provider = create_provider(&provider_name, &model_name)?;
 
     let model_switch_callback = get_model_switch_state();
 
@@ -4028,15 +4035,7 @@ pub async fn run(
                             new_model
                         );
 
-                        provider = providers::create_routed_provider_with_options(
-                            &new_provider,
-                            config.api_key.as_deref(),
-                            config.api_url.as_deref(),
-                            &config.reliability,
-                            &config.model_routes,
-                            &new_model,
-                            &provider_runtime_options,
-                        )?;
+                        provider = create_provider(&new_provider, &new_model)?;
 
                         provider_name = new_provider;
                         model_name = new_model;
@@ -4330,15 +4329,7 @@ pub async fn run(
                                 new_model
                             );
 
-                            provider = providers::create_routed_provider_with_options(
-                                &new_provider,
-                                config.api_key.as_deref(),
-                                config.api_url.as_deref(),
-                                &config.reliability,
-                                &config.model_routes,
-                                &new_model,
-                                &provider_runtime_options,
-                            )?;
+                            provider = create_provider(&new_provider, &new_model)?;
 
                             provider_name = new_provider;
                             model_name = new_model;
@@ -4621,6 +4612,7 @@ pub async fn process_message(
         &model_name,
         &provider_runtime_options,
     )?;
+    provider.set_session_id(session_id);
 
     let hardware_rag: Option<crate::rag::HardwareRag> = config
         .peripherals

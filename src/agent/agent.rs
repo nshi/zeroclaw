@@ -283,10 +283,13 @@ impl AgentBuilder {
         }
         let tool_specs = tools.iter().map(|tool| tool.spec()).collect();
 
+        let provider = self
+            .provider
+            .ok_or_else(|| anyhow::anyhow!("provider is required"))?;
+        provider.set_session_id(self.memory_session_id.as_deref());
+
         Ok(Agent {
-            provider: self
-                .provider
-                .ok_or_else(|| anyhow::anyhow!("provider is required"))?,
+            provider,
             tools,
             tool_specs,
             memory: self
@@ -347,6 +350,7 @@ impl Agent {
     }
 
     pub fn set_memory_session_id(&mut self, session_id: Option<String>) {
+        self.provider.set_session_id(session_id.as_deref());
         self.memory_session_id = session_id;
     }
 
