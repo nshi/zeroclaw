@@ -751,7 +751,7 @@ impl Agent {
                 )));
         }
 
-        let context = self
+        let mut context = self
             .memory_loader
             .load_context(
                 self.memory.as_ref(),
@@ -773,6 +773,8 @@ impl Agent {
                 .await;
         }
 
+        let skill_hint = crate::agent::prompt::build_skill_hint(&self.skills, user_message);
+        context.push_str(&skill_hint);
         let enriched = crate::agent::prompt::timestamp_prefix(user_message, Some(&context));
 
         self.history
@@ -921,7 +923,7 @@ impl Agent {
                 )));
         }
 
-        let context = self
+        let mut context = self
             .memory_loader
             .load_context(
                 self.memory.as_ref(),
@@ -943,6 +945,8 @@ impl Agent {
                 .await;
         }
 
+        let skill_hint = crate::agent::prompt::build_skill_hint(&self.skills, user_message);
+        context.push_str(&skill_hint);
         let enriched = crate::agent::prompt::timestamp_prefix(user_message, Some(&context));
 
         self.history

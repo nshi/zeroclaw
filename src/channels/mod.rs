@@ -402,6 +402,7 @@ struct ChannelRuntimeContext {
     max_tool_result_chars: usize,
     context_token_budget: usize,
     debouncer: Arc<debounce::MessageDebouncer>,
+    skills: Arc<Vec<crate::skills::Skill>>,
 }
 
 #[derive(Clone)]
@@ -2608,7 +2609,8 @@ async fn process_channel_message(
     };
 
     // Preserve user turn before the LLM call so interrupted requests keep context.
-    let stamped_content = crate::agent::prompt::timestamp_prefix(&msg.content, None);
+    let skill_hint = crate::agent::prompt::build_skill_hint(&ctx.skills, &msg.content);
+    let stamped_content = crate::agent::prompt::timestamp_prefix(&msg.content, Some(&skill_hint));
     append_sender_turn(
         ctx.as_ref(),
         &history_key,
@@ -5528,6 +5530,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::from_millis(
             config.channels_config.debounce_ms,
         ))),
+        skills: Arc::new(skills),
     });
 
     // Hydrate in-memory conversation histories from persisted JSONL session files.
@@ -5939,6 +5942,7 @@ mod tests {
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -6062,6 +6066,7 @@ mod tests {
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -6141,6 +6146,7 @@ mod tests {
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -6239,6 +6245,7 @@ mod tests {
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         };
 
         assert!(rollback_orphan_user_turn(
@@ -6820,6 +6827,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -6909,6 +6917,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -7012,6 +7021,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -7100,6 +7110,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -7198,6 +7209,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -7317,6 +7329,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -7417,6 +7430,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -7533,6 +7547,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -7636,6 +7651,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -7729,6 +7745,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -7945,6 +7962,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -8056,6 +8074,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -8186,6 +8205,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -8313,6 +8333,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -8418,6 +8439,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -8506,6 +8528,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -9289,6 +9312,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -9429,6 +9453,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -9612,6 +9637,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -9728,6 +9754,7 @@ BTC is currently around $65,000 based on latest tool output."#
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -10314,6 +10341,7 @@ This is an example JSON object for profile settings."#;
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -10409,6 +10437,7 @@ This is an example JSON object for profile settings."#;
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -10536,6 +10565,7 @@ This is an example JSON object for profile settings."#;
             max_tool_result_chars: 50000,
             context_token_budget: 128_000,
             debouncer: Arc::new(debounce::MessageDebouncer::new(std::time::Duration::ZERO)),
+            skills: Arc::new(vec![]),
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
         });
@@ -10714,6 +10744,7 @@ This is an example JSON object for profile settings."#;
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -10836,6 +10867,7 @@ This is an example JSON object for profile settings."#;
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -10950,6 +10982,7 @@ This is an example JSON object for profile settings."#;
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -11084,6 +11117,7 @@ This is an example JSON object for profile settings."#;
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         process_channel_message(
@@ -11356,6 +11390,7 @@ This is an example JSON object for profile settings."#;
             max_tool_result_chars: 0,
             context_token_budget: 0,
             debouncer: Arc::new(debounce::MessageDebouncer::new(Duration::ZERO)),
+            skills: Arc::new(vec![]),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);

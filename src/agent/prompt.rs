@@ -39,6 +39,94 @@ pub const AUTONOMY_SUPERVISED_TEXT: &str = "\
 - Do not preemptively refuse — attempt actions and let the runtime enforce restrictions.\n\
 - Use available tools confidently; the security policy will enforce boundaries.";
 
+/// Score and rank skills that match the user message, returning a context hint
+/// so the LLM knows which skill(s) to activate without relying on its own
+/// semantic matching against XML `<description>` blocks.
+///
+/// Match types (highest score wins per skill):
+/// - Slash command `/name` → score 10
+/// - Skill name as substring in message → score 5
+/// - Tag appears as word in message → score 3
+///
+/// Returns empty string when no skills match.
+pub fn build_skill_hint(skills: &[crate::skills::Skill], user_message: &str) -> String {
+    use std::fmt::Write;
+
+    if skills.is_empty() || user_message.is_empty() {
+        return String::new();
+    }
+
+    let msg_lower = user_message.to_ascii_lowercase();
+    let msg_trimmed = msg_lower.trim();
+
+    let mut scored: Vec<(&str, u32)> = Vec::new();
+
+    for skill in skills {
+        let name_lower = skill.name.to_ascii_lowercase();
+        let mut score: u32 = 0;
+
+        if msg_trimmed.starts_with('/') {
+            let cmd = msg_trimmed
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('/');
+            if cmd == name_lower {
+                score = score.max(10);
+            }
+        }
+
+        if score < 10
+            && msg_lower
+                .split_whitespace()
+                .any(|w| w.trim_end_matches(|c: char| c.is_ascii_punctuation()) == name_lower)
+        {
+            score = score.max(5);
+        }
+
+        if score < 5 {
+            for tag in &skill.tags {
+                let tag_lower = tag.to_ascii_lowercase();
+                if msg_lower
+                    .split_whitespace()
+                    .any(|w| w.trim_end_matches(|c: char| c.is_ascii_punctuation()) == tag_lower)
+                {
+                    score = score.max(3);
+                    break;
+                }
+            }
+        }
+
+        if score > 0 {
+            scored.push((&skill.name, score));
+        }
+    }
+
+    if scored.is_empty() {
+        return String::new();
+    }
+
+    scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    scored.truncate(3);
+
+    let mut hint = String::new();
+    if scored.len() == 1 {
+        let _ = writeln!(
+            hint,
+            "[Skill hint: call use_skill({}) for this request.]",
+            scored[0].0
+        );
+    } else {
+        hint.push_str("[Skill hint: matched skills (call the most relevant):\n");
+        for (i, (name, _)) in scored.iter().enumerate() {
+            let _ = writeln!(hint, "{}. use_skill({})", i + 1, name);
+        }
+        hint.push_str("]\n");
+    }
+
+    hint
+}
+
 /// Prefix a user message with the current local timestamp so the LLM has an
 /// accurate sense of "now" on every turn (system prompt stays stable for caching).
 pub fn timestamp_prefix(message: &str, context: Option<&str>) -> String {
@@ -733,5 +821,122 @@ mod tests {
             output.contains("bypass oversight"),
             "supervised should include 'bypass oversight' instructions"
         );
+    }
+
+    fn make_skill(name: &str, tags: Vec<&str>) -> crate::skills::Skill {
+        crate::skills::Skill {
+            name: name.into(),
+            description: format!("{name} skill"),
+            version: "1.0.0".into(),
+            author: None,
+            tags: tags.into_iter().map(String::from).collect(),
+            tools: vec![],
+            prompts: vec![],
+            location: None,
+        }
+    }
+
+    #[test]
+    fn skill_hint_empty_when_no_skills() {
+        assert_eq!(build_skill_hint(&[], "hello"), "");
+    }
+
+    #[test]
+    fn skill_hint_empty_when_no_match() {
+        let skills = vec![make_skill("deploy", vec!["release"])];
+        assert_eq!(build_skill_hint(&skills, "what is the weather?"), "");
+    }
+
+    #[test]
+    fn skill_hint_slash_command() {
+        let skills = vec![make_skill("commit", vec![])];
+        let hint = build_skill_hint(&skills, "/commit fix the tests");
+        assert!(hint.contains("use_skill(commit)"));
+    }
+
+    #[test]
+    fn skill_hint_name_match() {
+        let skills = vec![make_skill("commit", vec![])];
+        let hint = build_skill_hint(&skills, "please commit my changes");
+        assert!(hint.contains("use_skill(commit)"));
+    }
+
+    #[test]
+    fn skill_hint_tag_match() {
+        let skills = vec![make_skill("code-review", vec!["review", "pr"])];
+        let hint = build_skill_hint(&skills, "can you review this?");
+        assert!(hint.contains("use_skill(code-review)"));
+    }
+
+    #[test]
+    fn skill_hint_single_match_is_directive() {
+        let skills = vec![make_skill("deploy", vec!["release"])];
+        let hint = build_skill_hint(&skills, "/deploy to prod");
+        assert!(hint.contains("call use_skill(deploy) for this request"));
+    }
+
+    #[test]
+    fn skill_hint_multiple_matches_ranked() {
+        let skills = vec![
+            make_skill("commit", vec!["git"]),
+            make_skill("code-review", vec!["git"]),
+        ];
+        let hint = build_skill_hint(&skills, "/commit and also git stuff");
+        assert!(hint.contains("1. use_skill(commit)"));
+        assert!(hint.contains("2. use_skill(code-review)"));
+    }
+
+    #[test]
+    fn skill_hint_capped_at_three() {
+        let skills = vec![
+            make_skill("a", vec!["x"]),
+            make_skill("b", vec!["x"]),
+            make_skill("c", vec!["x"]),
+            make_skill("d", vec!["x"]),
+        ];
+        let hint = build_skill_hint(&skills, "do x stuff");
+        assert!(hint.contains("use_skill(a)"));
+        assert!(hint.contains("use_skill(b)"));
+        assert!(hint.contains("use_skill(c)"));
+        assert!(!hint.contains("use_skill(d)"));
+    }
+
+    #[test]
+    fn skill_hint_case_insensitive() {
+        let skills = vec![make_skill("Deploy", vec!["RELEASE"])];
+        let hint = build_skill_hint(&skills, "deploy the release");
+        assert!(hint.contains("use_skill(Deploy)"));
+    }
+
+    #[test]
+    fn skill_hint_short_name_no_false_positive() {
+        let skills = vec![make_skill("a", vec![])];
+        let hint = build_skill_hint(&skills, "what a great day");
+        // "a" appears in the message but only as a standalone article,
+        // which IS a whole-word match — this is expected behavior for
+        // single-char skill names. Users shouldn't name skills "a".
+        // The key fix: "a" no longer matches "great" or "day" via substring.
+        assert!(hint.contains("use_skill(a)"));
+    }
+
+    #[test]
+    fn skill_hint_no_substring_false_positive() {
+        let skills = vec![make_skill("do", vec![])];
+        let hint = build_skill_hint(&skills, "check the document");
+        assert!(hint.is_empty(), "\"do\" should not match \"document\"");
+    }
+
+    #[test]
+    fn skill_hint_punctuation_stripped() {
+        let skills = vec![make_skill("review", vec![])];
+        let hint = build_skill_hint(&skills, "can you review?");
+        assert!(hint.contains("use_skill(review)"));
+    }
+
+    #[test]
+    fn skill_hint_slash_no_cross_match() {
+        let skills = vec![make_skill("commit", vec![])];
+        let hint = build_skill_hint(&skills, "/deploy now");
+        assert!(hint.is_empty());
     }
 }

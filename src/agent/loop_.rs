@@ -3961,7 +3961,8 @@ pub async fn run(
             .as_ref()
             .map(|r| build_hardware_context(r, &effective_msg, &board_names, rag_limit))
             .unwrap_or_default();
-        let context = format!("{mem_context}{hw_context}");
+        let skill_hint = crate::agent::prompt::build_skill_hint(&skills, &effective_msg);
+        let context = format!("{mem_context}{hw_context}{skill_hint}");
         let enriched = crate::agent::prompt::timestamp_prefix(&effective_msg, Some(&context));
 
         let mut history = vec![
@@ -4226,7 +4227,8 @@ pub async fn run(
                 .as_ref()
                 .map(|r| build_hardware_context(r, &effective_input, &board_names, rag_limit))
                 .unwrap_or_default();
-            let context = format!("{mem_context}{hw_context}");
+            let skill_hint = crate::agent::prompt::build_skill_hint(&skills, &effective_input);
+            let context = format!("{mem_context}{hw_context}{skill_hint}");
             let enriched = crate::agent::prompt::timestamp_prefix(&effective_input, Some(&context));
 
             history.push(ChatMessage::user(&enriched));
@@ -4759,7 +4761,8 @@ pub async fn process_message(
         .as_ref()
         .map(|r| build_hardware_context(r, effective_msg_ref, &board_names, rag_limit))
         .unwrap_or_default();
-    let context = format!("{mem_context}{hw_context}");
+    let skill_hint = crate::agent::prompt::build_skill_hint(&skills, effective_msg_ref);
+    let context = format!("{mem_context}{hw_context}{skill_hint}");
     let enriched = crate::agent::prompt::timestamp_prefix(effective_msg_ref, Some(&context));
 
     let mut history = vec![
