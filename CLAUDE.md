@@ -19,6 +19,8 @@ _No custom slash commands defined yet._
 - Rust (edition 2021, stable toolchain) + tokio, serde, reqwest, teloxide (Telegram), slack-morphism (Slack) (001-simplify-channels-providers)
 - SQLite (session_sqlite), JSONL (session_store), in-memory (001-simplify-channels-providers)
 - Rust (edition 2024, stable toolchain) + tokio, serde, reqwest, teloxide (Telegram), slack-morphism (Slack), axum (gateway) (002-fix-tests-fast-builds)
+- Rust (edition 2024, stable toolchain) + tokio, serde, teloxide (Telegram), slack-morphism (Slack), axum (gateway) (003-centralize-system-prompt)
+- N/A (no persistence changes) (003-centralize-system-prompt)
 
 ## Recent Changes
 - 001-simplify-channels-providers: Added Rust (edition 2021, stable toolchain) + tokio, serde, reqwest, teloxide (Telegram), slack-morphism (Slack)

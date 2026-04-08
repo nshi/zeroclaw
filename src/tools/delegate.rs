@@ -1028,6 +1028,11 @@ impl DelegateTool {
             tool_descriptions: None,
             security_summary: None,
             autonomy_level: crate::security::AutonomyLevel::default(),
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
 
         let builder = SystemPromptBuilder::default()

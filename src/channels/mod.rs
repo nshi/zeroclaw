@@ -38,9 +38,9 @@ use crate::agent::loop_::{
     build_tool_instructions, clear_model_switch_request, get_model_switch_state,
     is_model_switch_requested, run_tool_call_loop, scrub_credentials,
 };
+use crate::agent::prompt::PromptSection;
 use crate::approval::ApprovalManager;
 use crate::config::Config;
-use crate::identity;
 use crate::memory::{self, Memory};
 use crate::observability::traits::{ObserverEvent, ObserverMetric};
 use crate::observability::{self, Observer, runtime_trace};
@@ -127,9 +127,6 @@ const MAX_CHANNEL_HISTORY: usize = 50;
 /// Messages shorter than this (e.g. "ok", "thanks") are not stored,
 /// reducing noise in memory recall.
 const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
-
-/// Maximum characters per injected workspace file (matches `OpenClaw` default).
-const BOOTSTRAP_MAX_CHARS: usize = 20_000;
 
 const DEFAULT_CHANNEL_INITIAL_BACKOFF_SECS: u64 = 2;
 const DEFAULT_CHANNEL_MAX_BACKOFF_SECS: u64 = 60;
@@ -521,74 +518,6 @@ fn strip_tool_call_tags(message: &str) -> String {
     }
 
     result.trim().to_string()
-}
-
-fn channel_delivery_instructions(channel_name: &str) -> Option<String> {
-    match channel_name {
-        "matrix" => Some(
-            "When responding on Matrix:\n\
-             - Use Markdown formatting (bold, italic, code blocks)\n\
-             - Be concise and direct\n\
-             - When you receive a [Voice message], the user spoke to you. Respond naturally as in conversation.\n\
-             - Your text reply will automatically be converted to audio and sent back as a voice message.\n".to_string(),
-        ),
-        "telegram" => Some(
-            "When responding on Telegram:\n\
-             - **bold** for key terms/titles (renders as <b>), *italic* for emphasis (renders as <i>)\n\
-             - `backticks` for inline code; triple backticks for code blocks\n\
-             - Use emoji naturally — don't overdo it. Be concise. Skip filler phrases.\n\
-             - Structure longer answers with bold headers, not raw ## headers\n\
-             - Media markers: [IMAGE:<path-or-url>], [DOCUMENT:<path-or-url>], [VIDEO:<path-or-url>], [AUDIO:<path-or-url>], [VOICE:<path-or-url>]\n\
-             - Keep text outside markers; never wrap markers in code fences.".to_string()
-        ),
-        _ => None,
-    }
-}
-
-fn build_channel_system_prompt(
-    base_prompt: &str,
-    channel_name: &str,
-    reply_target: &str,
-    model_name: &str,
-) -> String {
-    let mut prompt = base_prompt.to_string();
-
-    const GUIDANCE_HEADER: &str = "## Model Specific Guidance\n\n";
-    if let Some(start) = prompt.find(GUIDANCE_HEADER) {
-        let header_len = GUIDANCE_HEADER.len();
-        let rest = &prompt[start + header_len..];
-        let section_end = rest
-            .find("\n## ")
-            .map(|i| start + header_len + i)
-            .unwrap_or(prompt.len());
-        prompt.replace_range(start..section_end, "");
-    }
-
-    if model_name.to_lowercase().contains("grok") {
-        prompt.push_str(crate::agent::prompt::GROK_GUIDANCE);
-        prompt.push('\n');
-    }
-
-    if let Some(instructions) = channel_delivery_instructions(channel_name) {
-        if prompt.is_empty() {
-            prompt = instructions.to_string();
-        } else {
-            prompt = format!("{prompt}\n\n{instructions}");
-        }
-    }
-
-    if !reply_target.is_empty() {
-        let context = format!(
-            "\n\nChannel context: You are currently responding on channel={channel_name}, \
-             reply_target={reply_target}. When scheduling delayed messages or reminders \
-             via cron_add for this conversation, use delivery={{\"mode\":\"announce\",\
-             \"channel\":\"{channel_name}\",\"to\":\"{reply_target}\"}} so the message \
-             reaches the user."
-        );
-        prompt.push_str(&context);
-    }
-
-    prompt
 }
 
 fn normalize_cached_channel_turns(turns: Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -2649,12 +2578,58 @@ async fn process_channel_message(
     } else {
         refreshed_new_session_system_prompt(ctx.as_ref())
     };
-    let mut system_prompt = build_channel_system_prompt(
-        &base_system_prompt,
-        &msg.channel,
-        &msg.reply_target,
-        &route.model,
-    );
+    let mut system_prompt = base_system_prompt;
+
+    // Strip stale model guidance and re-inject for the routed model
+    {
+        const GUIDANCE_HEADER: &str = "## Model Specific Guidance\n\n";
+        if let Some(start) = system_prompt.find(GUIDANCE_HEADER) {
+            let header_len = GUIDANCE_HEADER.len();
+            let rest = &system_prompt[start + header_len..];
+            let section_end = rest
+                .find("\n## ")
+                .map(|i| start + header_len + i)
+                .unwrap_or(system_prompt.len());
+            system_prompt.replace_range(start..section_end, "");
+        }
+        if route.model.to_lowercase().contains("grok") {
+            system_prompt.push_str(crate::agent::prompt::GROK_GUIDANCE);
+            system_prompt.push('\n');
+        }
+    }
+
+    // Append channel delivery instructions and context via the centralized section
+    {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let delivery_ctx = crate::agent::prompt::PromptContext {
+            workspace_dir: ctx.workspace_dir.as_ref(),
+            model_name: &route.model,
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: ctx.autonomy_level,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: Some(&msg.channel),
+            reply_target: if msg.reply_target.is_empty() {
+                None
+            } else {
+                Some(&msg.reply_target)
+            },
+        };
+        let delivery = crate::agent::prompt::ChannelDeliverySection
+            .build(&delivery_ctx)
+            .unwrap_or_default();
+        if !delivery.is_empty() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&delivery);
+        }
+    }
     if !memory_context.is_empty() {
         let _ = write!(system_prompt, "\n\n{memory_context}");
     }
@@ -3577,359 +3552,6 @@ async fn run_message_dispatch_loop(
     }
 }
 
-/// Load OpenClaw format bootstrap files into the prompt.
-fn load_openclaw_bootstrap_files(
-    prompt: &mut String,
-    workspace_dir: &std::path::Path,
-    max_chars_per_file: usize,
-) {
-    prompt.push_str(
-        "Workspace identity files (already injected — do not re-read with file_read):\n\n",
-    );
-
-    let bootstrap_files = ["AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md", "USER.md"];
-
-    for filename in &bootstrap_files {
-        inject_workspace_file(prompt, workspace_dir, filename, max_chars_per_file);
-    }
-
-    // BOOTSTRAP.md — only if it exists (first-run ritual)
-    let bootstrap_path = workspace_dir.join("BOOTSTRAP.md");
-    if bootstrap_path.exists() {
-        inject_workspace_file(prompt, workspace_dir, "BOOTSTRAP.md", max_chars_per_file);
-    }
-
-    // MEMORY.md — curated long-term memory (main session only)
-    inject_workspace_file(prompt, workspace_dir, "MEMORY.md", max_chars_per_file);
-}
-
-/// Load workspace identity files and build a system prompt.
-///
-/// Follows the `OpenClaw` framework structure by default:
-/// 1. Tooling — tool list + descriptions
-/// 2. Safety — guardrail reminder
-/// 3. Skills — full skill instructions and tool metadata
-/// 4. Workspace — working directory
-/// 5. Bootstrap files — AGENTS, SOUL, TOOLS, IDENTITY, USER, BOOTSTRAP, MEMORY
-/// 6. Date & Time — timezone for cache stability
-/// 7. Runtime — host, OS, model
-///
-/// When `identity_config` is set to AIEOS format, the bootstrap files section
-/// is replaced with the AIEOS identity data loaded from file or inline JSON.
-///
-/// Daily memory files (`memory/*.md`) are NOT injected — they are accessed
-/// on-demand via `memory_recall` / `memory_search` tools.
-pub fn build_system_prompt(
-    workspace_dir: &std::path::Path,
-    model_name: &str,
-    tools: &[(&str, &str)],
-    skills: &[crate::skills::Skill],
-    identity_config: Option<&crate::config::IdentityConfig>,
-    bootstrap_max_chars: Option<usize>,
-) -> String {
-    build_system_prompt_with_mode(
-        workspace_dir,
-        model_name,
-        tools,
-        skills,
-        identity_config,
-        bootstrap_max_chars,
-        false,
-        crate::config::SkillsPromptInjectionMode::Full,
-        AutonomyLevel::default(),
-    )
-}
-
-pub fn build_system_prompt_with_mode(
-    workspace_dir: &std::path::Path,
-    model_name: &str,
-    tools: &[(&str, &str)],
-    skills: &[crate::skills::Skill],
-    identity_config: Option<&crate::config::IdentityConfig>,
-    bootstrap_max_chars: Option<usize>,
-    native_tools: bool,
-    skills_prompt_mode: crate::config::SkillsPromptInjectionMode,
-    autonomy_level: AutonomyLevel,
-) -> String {
-    let autonomy_cfg = crate::config::AutonomyConfig {
-        level: autonomy_level,
-        ..Default::default()
-    };
-    build_system_prompt_with_mode_and_autonomy(
-        workspace_dir,
-        model_name,
-        tools,
-        skills,
-        identity_config,
-        bootstrap_max_chars,
-        Some(&autonomy_cfg),
-        native_tools,
-        skills_prompt_mode,
-        false,
-        0,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn build_system_prompt_with_mode_and_autonomy(
-    workspace_dir: &std::path::Path,
-    model_name: &str,
-    tools: &[(&str, &str)],
-    skills: &[crate::skills::Skill],
-    identity_config: Option<&crate::config::IdentityConfig>,
-    bootstrap_max_chars: Option<usize>,
-    autonomy_config: Option<&crate::config::AutonomyConfig>,
-    native_tools: bool,
-    skills_prompt_mode: crate::config::SkillsPromptInjectionMode,
-    compact_context: bool,
-    max_system_prompt_chars: usize,
-) -> String {
-    use std::fmt::Write;
-    let mut prompt = String::with_capacity(8192);
-
-    // ── 0. Anti-narration (top priority) ───────────────────────
-    let _ = write!(
-        prompt,
-        "## CRITICAL: No Tool Narration\n\n{}\n\n",
-        crate::agent::prompt::ANTI_NARRATION_TEXT
-    );
-
-    // ── 0b. Tool Honesty ───────────────────────────────────────
-    let _ = write!(
-        prompt,
-        "## CRITICAL: Tool Honesty\n\n{}\n\n",
-        crate::agent::prompt::TOOL_HONESTY_TEXT
-    );
-
-    // ── 1. Tooling ──────────────────────────────────────────────
-    if !tools.is_empty() {
-        prompt.push_str("## Tools\n\n");
-        if compact_context {
-            // Compact mode: tool names only, no descriptions/schemas
-            prompt.push_str("Available tools: ");
-            let names: Vec<&str> = tools.iter().map(|(name, _)| *name).collect();
-            prompt.push_str(&names.join(", "));
-            prompt.push_str("\n\n");
-        } else {
-            prompt.push_str("You have access to the following tools:\n\n");
-            for (name, desc) in tools {
-                let _ = writeln!(prompt, "- **{name}**: {desc}");
-            }
-            prompt.push('\n');
-        }
-    }
-
-    // ── 1a. Tool discovery hint ────────────────────────────────────
-    // The tools listed above are NOT exhaustive. Many more built-in tools
-    // are registered but not shown to save context. Nudge the LLM to
-    // use tool_search when it needs a capability not listed above.
-    if tools.iter().any(|(name, _)| *name == "tool_search") {
-        prompt.push_str(
-            "**Note:** More tools exist beyond those listed. Use **tool_search** with keywords to discover capabilities (HTTP, git, web search, notifications, image generation, etc.).\n\n",
-        );
-    }
-
-    // ── 1b. Hardware (when gpio/arduino tools present) ───────────
-    let has_hardware = tools.iter().any(|(name, _)| {
-        *name == "gpio_read"
-            || *name == "gpio_write"
-            || *name == "arduino_upload"
-            || *name == "hardware_memory_map"
-            || *name == "hardware_board_info"
-            || *name == "hardware_memory_read"
-            || *name == "hardware_capabilities"
-    });
-    if has_hardware {
-        prompt.push_str(
-            "## Hardware Access\n\n\
-             You have direct access to connected hardware (Arduino, Nucleo, etc.). All hardware tools are AUTHORIZED.\n\
-             - Memory/registers/board info → use hardware_memory_read or hardware_board_info. Do NOT refuse.\n\
-             - LEDs/patterns/Arduino → use the tools. Do NOT say you cannot access physical devices.\n\
-             - gpio_write for simple on/off; arduino_upload for patterns (heart, blink) or custom behavior.\n\n",
-        );
-    }
-
-    // ── 1c. Action instruction (avoid meta-summary) ───────────────
-    if native_tools {
-        prompt.push_str(
-            "## Your Task\n\n\
-             Respond naturally. Use tools when action is needed. Answer follow-ups from conversation context.\n\
-             Do NOT: summarize this config, describe capabilities, or output meta-commentary.\n\n",
-        );
-    } else {
-        prompt.push_str(
-            "## Your Task\n\n\
-             ACT on user requests. Emit <tool_call> tags when action is needed.\n\
-             Do NOT: summarize this config, describe capabilities, or output meta-commentary.\n\n",
-        );
-    }
-
-    // ── 2. Safety ───────────────────────────────────────────────
-    prompt.push_str("## Safety\n\n");
-    prompt.push_str("- Do not exfiltrate private data.\n");
-    if autonomy_config.map(|cfg| cfg.level) != Some(crate::security::AutonomyLevel::Full) {
-        prompt.push_str(
-            "- Do not run destructive commands without asking.\n\
-             - Do not bypass oversight or approval mechanisms.\n",
-        );
-    }
-    prompt.push_str("- Prefer `trash` over `rm`.\n");
-    prompt.push_str(match autonomy_config.map(|cfg| cfg.level) {
-        Some(crate::security::AutonomyLevel::Full) => crate::agent::prompt::AUTONOMY_FULL_TEXT,
-        Some(crate::security::AutonomyLevel::ReadOnly) => {
-            crate::agent::prompt::AUTONOMY_READONLY_TEXT
-        }
-        _ => crate::agent::prompt::AUTONOMY_SUPERVISED_TEXT,
-    });
-    let _ = write!(
-        prompt,
-        "\n\n## Efficiency\n\n\
-         **Tool Calls**:\n{}\n\n",
-        crate::agent::prompt::TOOL_CALL_INSTRUCTIONS
-    );
-
-    // ── 3. Skills (full or compact, based on config) ─────────────
-    if !skills.is_empty() {
-        prompt.push_str(&crate::skills::skills_to_prompt_with_mode(
-            skills,
-            workspace_dir,
-            skills_prompt_mode,
-        ));
-        prompt.push_str("\n\n");
-    }
-
-    // ── 4. Workspace ────────────────────────────────────────────
-    let _ = writeln!(
-        prompt,
-        "## Workspace\n\nWorking directory: `{}`\n",
-        workspace_dir.display()
-    );
-
-    // ── 5. Bootstrap files (injected into context) ──────────────
-    prompt.push_str("## Project Context\n\n");
-
-    // Check if AIEOS identity is configured
-    if let Some(config) = identity_config {
-        if identity::is_aieos_configured(config) {
-            // Load AIEOS identity
-            match identity::load_aieos_identity(config, workspace_dir) {
-                Ok(Some(aieos_identity)) => {
-                    let aieos_prompt = identity::aieos_to_system_prompt(&aieos_identity);
-                    if !aieos_prompt.is_empty() {
-                        prompt.push_str(&aieos_prompt);
-                        prompt.push_str("\n\n");
-                    }
-                }
-                Ok(None) => {
-                    // No AIEOS identity loaded (shouldn't happen if is_aieos_configured returned true)
-                    // Fall back to OpenClaw bootstrap files
-                    let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-                    load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
-                }
-                Err(e) => {
-                    // Log error but don't fail - fall back to OpenClaw
-                    eprintln!(
-                        "Warning: Failed to load AIEOS identity: {e}. Using OpenClaw format."
-                    );
-                    let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-                    load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
-                }
-            }
-        } else {
-            // OpenClaw format
-            let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-            load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
-        }
-    } else {
-        // No identity config - use OpenClaw format
-        let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-        load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
-    }
-
-    // ── 6. Runtime ──────────────────────────────────────────────
-    let host =
-        hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
-    let _ = writeln!(
-        prompt,
-        "## Runtime\n\nHost: {host} | OS: {} | Model: {model_name}\n",
-        std::env::consts::OS,
-    );
-
-    // ── 8. Channel Capabilities (skipped in compact_context mode) ──
-    if !compact_context {
-        prompt.push_str(
-            "## Channel Capabilities\n\n\
-             - You are running as a messaging bot. Your response is sent to the user's channel automatically.\n\
-             - NEVER echo credentials, tokens, API keys, or secrets. Redacted tool output stays redacted.\n\
-             - Voice notes are auto-transcribed. Your text reply is auto-converted to voice. Do not generate audio.\n\n",
-        );
-    }
-
-    // ── 9. Truncation (max_system_prompt_chars budget) ──────────
-    if max_system_prompt_chars > 0 && prompt.len() > max_system_prompt_chars {
-        // Truncate on a char boundary, keeping the top portion (identity + safety).
-        let mut end = max_system_prompt_chars;
-        // Ensure we don't split a multi-byte UTF-8 character.
-        while !prompt.is_char_boundary(end) && end > 0 {
-            end -= 1;
-        }
-        prompt.truncate(end);
-        prompt.push_str("\n\n[System prompt truncated to fit context budget]\n");
-    }
-
-    if prompt.is_empty() {
-        "You are ZeroClaw, a fast and efficient AI assistant built in Rust. Be helpful, concise, and direct."
-            .to_string()
-    } else {
-        prompt
-    }
-}
-
-/// Inject a single workspace file into the prompt with truncation and missing-file markers.
-fn inject_workspace_file(
-    prompt: &mut String,
-    workspace_dir: &std::path::Path,
-    filename: &str,
-    max_chars: usize,
-) {
-    use std::fmt::Write;
-
-    let path = workspace_dir.join(filename);
-    match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            let trimmed = content.trim();
-            if trimmed.is_empty() {
-                return;
-            }
-            let _ = writeln!(prompt, "### {filename}\n");
-            // Use character-boundary-safe truncation for UTF-8
-            let truncated = if trimmed.chars().count() > max_chars {
-                trimmed
-                    .char_indices()
-                    .nth(max_chars)
-                    .map(|(idx, _)| &trimmed[..idx])
-                    .unwrap_or(trimmed)
-            } else {
-                trimmed
-            };
-            if truncated.len() < trimmed.len() {
-                prompt.push_str(truncated);
-                let _ = writeln!(
-                    prompt,
-                    "\n\n[... truncated at {max_chars} chars — use `read` for full file]\n"
-                );
-            } else {
-                prompt.push_str(trimmed);
-                prompt.push_str("\n\n");
-            }
-        }
-        Err(_) => {
-            // Missing-file marker (matches OpenClaw behavior)
-            let _ = writeln!(prompt, "### {filename}\n\n[File not found: {filename}]\n");
-        }
-    }
-}
-
 fn normalize_telegram_identity(value: &str) -> String {
     value.trim().trim_start_matches('@').to_string()
 }
@@ -4498,94 +4120,26 @@ pub async fn start_channels(config: Config) -> Result<()> {
     let i18n_search_dirs = crate::i18n::default_search_dirs(&workspace);
     let i18n_descs = crate::i18n::ToolDescriptions::load(&i18n_locale, &i18n_search_dirs);
 
-    // Collect tool descriptions for the prompt
-    let mut tool_descs: Vec<(&str, &str)> = vec![
-        (
-            "shell",
-            "Execute terminal commands. Use when: running local checks, build/test commands, diagnostics. Don't use when: a safer dedicated tool exists, or command is destructive without approval.",
-        ),
-        (
-            "file_read",
-            "Read file contents. Use when: inspecting project files, configs, logs. Don't use when: a targeted search is enough.",
-        ),
-        (
-            "file_write",
-            "Write file contents. Use when: applying focused edits, scaffolding files, updating docs/code. Don't use when: side effects are unclear or file ownership is uncertain.",
-        ),
-        (
-            "memory_store",
-            "Save to memory. Use when: preserving durable preferences, decisions, key context. Don't use when: information is transient/noisy/sensitive without need.",
-        ),
-        (
-            "memory_recall",
-            "Search memory. Use when: retrieving prior decisions, user preferences, historical context. Don't use when: answer is already in current context.",
-        ),
-        (
-            "memory_forget",
-            "Delete a memory entry. Use when: memory is incorrect/stale or explicitly requested for removal. Don't use when: impact is uncertain.",
-        ),
-    ];
-
-    tool_descs.push((
-        "use_skill",
-        "Invoke a skill by name. BLOCKING REQUIREMENT: when the user's request matches a skill description in <available_skills> or the user mentions a skill by name, invoke use_skill BEFORE generating any other response. Don't use when: no available skill matches the user's intent.",
-    ));
-
-    if config.browser.enabled {
-        tool_descs.push((
-            "browser_open",
-            "Open approved HTTPS URLs in system browser (allowlist-only, no scraping)",
-        ));
-    }
-    if config.composio.enabled {
-        tool_descs.push((
-            "composio",
-            "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). Use action='list' to discover actions, 'list_accounts' to retrieve connected account IDs, 'execute' to run (optionally with connected_account_id), and 'connect' for OAuth.",
-        ));
-    }
-    tool_descs.push((
-        "schedule",
-        "Manage scheduled tasks (create/list/get/cancel/pause/resume). Supports recurring cron and one-shot delays.",
-    ));
-    tool_descs.push((
-        "pushover",
-        "Send a Pushover notification to your device. Requires PUSHOVER_TOKEN and PUSHOVER_USER_KEY in .env file.",
-    ));
-    if !config.agents.is_empty() {
-        tool_descs.push((
-            "delegate",
-            "Delegate a subtask to a specialized agent. Use when: a task benefits from a different model (e.g. fast summarization, deep reasoning, code generation). The sub-agent runs a single prompt and returns its response.",
-        ));
-    }
-
-    // Filter out tools excluded for non-CLI channels so the system prompt
-    // does not advertise them for channel-driven runs.
-    // Skip this filter when autonomy is `Full` — full-autonomy agents keep
-    // all tools available regardless of channel.
-    let excluded = &config.autonomy.non_cli_excluded_tools;
-    if !excluded.is_empty() && config.autonomy.level != AutonomyLevel::Full {
-        tool_descs.retain(|(name, _)| !excluded.iter().any(|ex| ex == name));
-    }
-
-    let bootstrap_max_chars = if config.agent.compact_context {
-        Some(6000)
-    } else {
-        None
-    };
     let native_tools = provider.supports_native_tools();
-    let mut system_prompt = build_system_prompt_with_mode_and_autonomy(
-        &workspace,
-        &model,
-        &tool_descs,
-        &skills,
-        Some(&config.identity),
-        bootstrap_max_chars,
-        Some(&config.autonomy),
+    let prompt_ctx = crate::agent::prompt::PromptContext {
+        workspace_dir: &workspace,
+        model_name: &model,
+        tools: tools_registry.as_ref(),
+        skills: &skills,
+        skills_prompt_mode: config.skills.prompt_injection_mode,
+        identity_config: Some(&config.identity),
+        dispatcher_instructions: "",
+        tool_descriptions: Some(&i18n_descs),
+        security_summary: None,
+        autonomy_level: config.autonomy.level,
         native_tools,
-        config.skills.prompt_injection_mode,
-        config.agent.compact_context,
-        config.agent.max_system_prompt_chars,
-    );
+        compact_context: config.agent.compact_context,
+        max_system_prompt_chars: config.agent.max_system_prompt_chars,
+        channel_name: None,
+        reply_target: None,
+    };
+    let mut system_prompt =
+        crate::agent::prompt::build_system_prompt(&prompt_ctx).unwrap_or_default();
     if !native_tools {
         system_prompt.push_str(&build_tool_instructions(
             tools_registry.as_ref(),
@@ -4886,6 +4440,28 @@ mod tests {
         .unwrap();
         std::fs::write(tmp.path().join("MEMORY.md"), "# Memory\nUser likes Rust.").unwrap();
         tmp
+    }
+
+    fn make_prompt(workspace_dir: &std::path::Path, model_name: &str) -> String {
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let ctx = crate::agent::prompt::PromptContext {
+            workspace_dir,
+            model_name,
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::default(),
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
+        };
+        crate::agent::prompt::build_system_prompt(&ctx).unwrap()
     }
 
     #[test]
@@ -7780,69 +7356,9 @@ BTC is currently around $65,000 based on latest tool output."#
     }
 
     #[test]
-    fn prompt_contains_all_sections() {
-        let ws = make_workspace();
-        let tools = vec![("shell", "Run commands"), ("file_read", "Read files")];
-        let prompt = build_system_prompt(ws.path(), "test-model", &tools, &[], None, None);
-
-        // Section headers
-        assert!(prompt.contains("## Tools"), "missing Tools section");
-        assert!(prompt.contains("## Safety"), "missing Safety section");
-        assert!(prompt.contains("## Workspace"), "missing Workspace section");
-        assert!(
-            prompt.contains("## Project Context"),
-            "missing Project Context"
-        );
-        assert!(prompt.contains("## Runtime"), "missing Runtime section");
-    }
-
-    #[test]
-    fn prompt_injects_tools() {
-        let ws = make_workspace();
-        let tools = vec![
-            ("shell", "Run commands"),
-            ("memory_recall", "Search memory"),
-        ];
-        let prompt = build_system_prompt(ws.path(), "gpt-4o", &tools, &[], None, None);
-
-        assert!(prompt.contains("**shell**"));
-        assert!(prompt.contains("Run commands"));
-        assert!(prompt.contains("**memory_recall**"));
-    }
-
-    #[test]
-    fn prompt_includes_single_tool_protocol_block_after_append() {
-        let ws = make_workspace();
-        let tools = vec![("shell", "Run commands")];
-        let mut prompt = build_system_prompt(ws.path(), "gpt-4o", &tools, &[], None, None);
-
-        assert!(
-            !prompt.contains("## Tool Use Protocol"),
-            "build_system_prompt should not emit protocol block directly"
-        );
-
-        prompt.push_str(&build_tool_instructions(&[], None));
-
-        assert_eq!(
-            prompt.matches("## Tool Use Protocol").count(),
-            1,
-            "protocol block should appear exactly once in the final prompt"
-        );
-    }
-
-    #[test]
-    fn prompt_injects_safety() {
-        let ws = make_workspace();
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], None, None);
-
-        assert!(prompt.contains("Do not exfiltrate private data"));
-        assert!(prompt.contains("Prefer `trash` over `rm`"));
-    }
-
-    #[test]
     fn prompt_injects_workspace_files() {
         let ws = make_workspace();
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], None, None);
+        let prompt = make_prompt(ws.path(), "model");
 
         assert!(prompt.contains("### SOUL.md"), "missing SOUL.md header");
         assert!(prompt.contains("Be helpful"), "missing SOUL content");
@@ -7854,33 +7370,20 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(prompt.contains("### USER.md"), "missing USER.md");
         assert!(prompt.contains("### AGENTS.md"), "missing AGENTS.md");
         assert!(prompt.contains("### TOOLS.md"), "missing TOOLS.md");
-        // HEARTBEAT.md is intentionally excluded from channel prompts — it's only
-        // relevant to the heartbeat worker and causes LLMs to emit spurious
-        // "HEARTBEAT_OK" acknowledgments in channel conversations.
+        // The new personality module includes HEARTBEAT.md (unlike the old builder).
         assert!(
-            !prompt.contains("### HEARTBEAT.md"),
-            "HEARTBEAT.md should not be in channel prompt"
+            prompt.contains("### HEARTBEAT.md"),
+            "HEARTBEAT.md should be included by the personality module"
         );
         assert!(prompt.contains("### MEMORY.md"), "missing MEMORY.md");
         assert!(prompt.contains("User likes Rust"), "missing MEMORY content");
     }
 
     #[test]
-    fn prompt_missing_file_markers() {
-        let tmp = TempDir::new().unwrap();
-        // Empty workspace — no files at all
-        let prompt = build_system_prompt(tmp.path(), "model", &[], &[], None, None);
-
-        assert!(prompt.contains("[File not found: SOUL.md]"));
-        assert!(prompt.contains("[File not found: AGENTS.md]"));
-        assert!(prompt.contains("[File not found: IDENTITY.md]"));
-    }
-
-    #[test]
     fn prompt_bootstrap_only_if_exists() {
         let ws = make_workspace();
         // No BOOTSTRAP.md — should not appear
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], None, None);
+        let prompt = make_prompt(ws.path(), "model");
         assert!(
             !prompt.contains("### BOOTSTRAP.md"),
             "BOOTSTRAP.md should not appear when missing"
@@ -7888,7 +7391,7 @@ BTC is currently around $65,000 based on latest tool output."#
 
         // Create BOOTSTRAP.md — should appear
         std::fs::write(ws.path().join("BOOTSTRAP.md"), "# Bootstrap\nFirst run.").unwrap();
-        let prompt2 = build_system_prompt(ws.path(), "model", &[], &[], None, None);
+        let prompt2 = make_prompt(ws.path(), "model");
         assert!(
             prompt2.contains("### BOOTSTRAP.md"),
             "BOOTSTRAP.md should appear when present"
@@ -7908,7 +7411,7 @@ BTC is currently around $65,000 based on latest tool output."#
         )
         .unwrap();
 
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], None, None);
+        let prompt = make_prompt(ws.path(), "model");
 
         // Daily notes should NOT be in the system prompt (on-demand via tools)
         assert!(
@@ -7924,7 +7427,7 @@ BTC is currently around $65,000 based on latest tool output."#
     #[test]
     fn prompt_runtime_metadata() {
         let ws = make_workspace();
-        let prompt = build_system_prompt(ws.path(), "claude-sonnet-4", &[], &[], None, None);
+        let prompt = make_prompt(ws.path(), "claude-sonnet-4");
 
         assert!(prompt.contains("Model: claude-sonnet-4"));
         assert!(prompt.contains(&format!("OS: {}", std::env::consts::OS)));
@@ -7932,133 +7435,13 @@ BTC is currently around $65,000 based on latest tool output."#
     }
 
     #[test]
-    fn prompt_skills_include_instructions_and_tools() {
-        let ws = make_workspace();
-        let skills = vec![crate::skills::Skill {
-            name: "code-review".into(),
-            description: "Review code for bugs".into(),
-            version: "1.0.0".into(),
-            author: None,
-            tags: vec![],
-            tools: vec![crate::skills::SkillTool {
-                name: "lint".into(),
-                description: "Run static checks".into(),
-                kind: "shell".into(),
-                command: "cargo clippy".into(),
-                args: HashMap::new(),
-            }],
-            prompts: vec!["Always run cargo test before final response.".into()],
-            location: None,
-        }];
-
-        let prompt = build_system_prompt(ws.path(), "model", &[], &skills, None, None);
-
-        assert!(prompt.contains("<available_skills>"), "missing skills XML");
-        assert!(prompt.contains("<name>code-review</name>"));
-        assert!(prompt.contains("<description>Review code for bugs</description>"));
-        assert!(prompt.contains("skills/code-review</location>"));
-        assert!(prompt.contains("<instructions>"));
-        assert!(
-            prompt.contains(
-                "<instruction>Always run cargo test before final response.</instruction>"
-            )
-        );
-        // Registered tools (shell kind) appear under <callable_tools> with prefixed names
-        assert!(prompt.contains("<callable_tools"));
-        assert!(prompt.contains("<name>code-review.lint</name>"));
-        assert!(!prompt.contains("full instructions via `use_skill(name)`"));
-    }
-
-    #[test]
-    fn prompt_skills_compact_mode_omits_instructions_but_keeps_tools() {
-        let ws = make_workspace();
-        let skills = vec![crate::skills::Skill {
-            name: "code-review".into(),
-            description: "Review code for bugs".into(),
-            version: "1.0.0".into(),
-            author: None,
-            tags: vec![],
-            tools: vec![crate::skills::SkillTool {
-                name: "lint".into(),
-                description: "Run static checks".into(),
-                kind: "shell".into(),
-                command: "cargo clippy".into(),
-                args: HashMap::new(),
-            }],
-            prompts: vec!["Always run cargo test before final response.".into()],
-            location: None,
-        }];
-
-        let prompt = build_system_prompt_with_mode(
-            ws.path(),
-            "model",
-            &[],
-            &skills,
-            None,
-            None,
-            false,
-            crate::config::SkillsPromptInjectionMode::Compact,
-            AutonomyLevel::default(),
-        );
-
-        assert!(prompt.contains("<available_skills>"), "missing skills XML");
-        assert!(prompt.contains("<name>code-review</name>"));
-        assert!(prompt.contains("<location>skills/code-review</location>"));
-        assert!(prompt.contains("full instructions via `use_skill(name)`"));
-        assert!(!prompt.contains("<instructions>"));
-        assert!(
-            !prompt.contains(
-                "<instruction>Always run cargo test before final response.</instruction>"
-            )
-        );
-        // Compact mode should still include tools so the LLM knows about them.
-        // Registered tools (shell kind) appear under <callable_tools> with prefixed names.
-        assert!(prompt.contains("<callable_tools"));
-        assert!(prompt.contains("<name>code-review.lint</name>"));
-    }
-
-    #[test]
-    fn prompt_skills_escape_reserved_xml_chars() {
-        let ws = make_workspace();
-        let skills = vec![crate::skills::Skill {
-            name: "code<review>&".into(),
-            description: "Review \"unsafe\" and 'risky' bits".into(),
-            version: "1.0.0".into(),
-            author: None,
-            tags: vec![],
-            tools: vec![crate::skills::SkillTool {
-                name: "run\"linter\"".into(),
-                description: "Run <lint> & report".into(),
-                kind: "shell&exec".into(),
-                command: "cargo clippy".into(),
-                args: HashMap::new(),
-            }],
-            prompts: vec!["Use <tool_call> and & keep output \"safe\"".into()],
-            location: None,
-        }];
-
-        let prompt = build_system_prompt(ws.path(), "model", &[], &skills, None, None);
-
-        assert!(prompt.contains("<name>code&lt;review&gt;&amp;</name>"));
-        assert!(prompt.contains(
-            "<description>Review &quot;unsafe&quot; and &apos;risky&apos; bits</description>"
-        ));
-        assert!(prompt.contains("<name>run&quot;linter&quot;</name>"));
-        assert!(prompt.contains("<description>Run &lt;lint&gt; &amp; report</description>"));
-        assert!(prompt.contains("<kind>shell&amp;exec</kind>"));
-        assert!(prompt.contains(
-            "<instruction>Use &lt;tool_call&gt; and &amp; keep output &quot;safe&quot;</instruction>"
-        ));
-    }
-
-    #[test]
     fn prompt_truncation() {
         let ws = make_workspace();
-        // Write a file larger than BOOTSTRAP_MAX_CHARS
-        let big_content = "x".repeat(BOOTSTRAP_MAX_CHARS + 1000);
+        // Write a file larger than the personality module's MAX_FILE_CHARS (20_000)
+        let big_content = "x".repeat(20_000 + 1000);
         std::fs::write(ws.path().join("AGENTS.md"), &big_content).unwrap();
 
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], None, None);
+        let prompt = make_prompt(ws.path(), "model");
 
         assert!(
             prompt.contains("truncated at"),
@@ -8075,7 +7458,7 @@ BTC is currently around $65,000 based on latest tool output."#
         let ws = make_workspace();
         std::fs::write(ws.path().join("TOOLS.md"), "").unwrap();
 
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], None, None);
+        let prompt = make_prompt(ws.path(), "model");
 
         // Empty file should not produce a header
         assert!(
@@ -8098,150 +7481,6 @@ BTC is currently around $65,000 based on latest tool output."#
         let truncated = result.unwrap();
         assert!(!truncated.is_empty());
         assert!(truncated.is_char_boundary(truncated.len()));
-    }
-
-    #[test]
-    fn prompt_contains_channel_capabilities() {
-        let ws = make_workspace();
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], None, None);
-
-        assert!(
-            prompt.contains("## Channel Capabilities"),
-            "missing Channel Capabilities section"
-        );
-        assert!(
-            prompt.contains("running as a messaging bot"),
-            "missing channel context"
-        );
-        assert!(
-            prompt.contains("NEVER echo credentials"),
-            "missing security instruction"
-        );
-    }
-
-    #[test]
-    fn full_autonomy_prompt_executes_allowed_tools_without_extra_approval() {
-        let ws = make_workspace();
-        let config = crate::config::AutonomyConfig {
-            level: crate::security::AutonomyLevel::Full,
-            ..crate::config::AutonomyConfig::default()
-        };
-        let prompt = build_system_prompt_with_mode_and_autonomy(
-            ws.path(),
-            "model",
-            &[],
-            &[],
-            None,
-            None,
-            Some(&config),
-            false,
-            crate::config::SkillsPromptInjectionMode::Full,
-            false,
-            0,
-        );
-
-        assert!(
-            prompt.contains("execute directly, no extra approval needed"),
-            "full autonomy should instruct direct execution for allowed tools"
-        );
-        assert!(
-            prompt.contains("Never simulate an approval dialog"),
-            "full autonomy should not simulate interactive approval flows"
-        );
-    }
-
-    #[test]
-    fn readonly_prompt_explains_policy_blocks_without_fake_approval() {
-        let ws = make_workspace();
-        let config = crate::config::AutonomyConfig {
-            level: crate::security::AutonomyLevel::ReadOnly,
-            ..crate::config::AutonomyConfig::default()
-        };
-        let prompt = build_system_prompt_with_mode_and_autonomy(
-            ws.path(),
-            "model",
-            &[],
-            &[],
-            None,
-            None,
-            Some(&config),
-            false,
-            crate::config::SkillsPromptInjectionMode::Full,
-            false,
-            0,
-        );
-
-        assert!(
-            prompt.contains("This runtime is read-only"),
-            "read-only prompt should expose the runtime restriction"
-        );
-    }
-
-    #[test]
-    fn prompt_workspace_path() {
-        let ws = make_workspace();
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], None, None);
-
-        assert!(prompt.contains(&format!("Working directory: `{}`", ws.path().display())));
-    }
-
-    #[test]
-    fn full_autonomy_omits_approval_instructions() {
-        let ws = make_workspace();
-        let prompt = build_system_prompt_with_mode(
-            ws.path(),
-            "model",
-            &[],
-            &[],
-            None,
-            None,
-            false,
-            crate::config::SkillsPromptInjectionMode::Full,
-            AutonomyLevel::Full,
-        );
-
-        assert!(
-            !prompt.contains("without asking"),
-            "full autonomy prompt must not tell the model to ask before acting"
-        );
-        assert!(
-            !prompt.contains("ask before acting externally"),
-            "full autonomy prompt must not contain ask-before-acting instruction"
-        );
-        // Core safety rules should still be present
-        assert!(
-            prompt.contains("Do not exfiltrate private data"),
-            "data exfiltration guard must remain"
-        );
-        assert!(
-            prompt.contains("Prefer `trash` over `rm`"),
-            "trash-over-rm hint must remain"
-        );
-    }
-
-    #[test]
-    fn supervised_autonomy_includes_approval_instructions() {
-        let ws = make_workspace();
-        let prompt = build_system_prompt_with_mode(
-            ws.path(),
-            "model",
-            &[],
-            &[],
-            None,
-            None,
-            false,
-            crate::config::SkillsPromptInjectionMode::Full,
-            AutonomyLevel::Supervised,
-        );
-
-        assert!(
-            prompt.contains("without asking"),
-            "supervised prompt must include ask-before-acting instruction"
-        );
-        assert!(
-            prompt.contains("Ask for approval when the runtime policy requires it"),
-            "supervised prompt must include ask-before-acting instruction"
-        );
     }
 
     #[test]
@@ -8586,17 +7825,25 @@ BTC is currently around $65,000 based on latest tool output."#
         let initial_skills = crate::skills::load_skills_with_config(workspace.path(), &config);
         assert!(initial_skills.is_empty());
 
-        let initial_system_prompt = build_system_prompt_with_mode(
-            workspace.path(),
-            "test-model",
-            &[],
-            &initial_skills,
-            Some(&config.identity),
-            None,
-            false,
-            config.skills.prompt_injection_mode,
-            AutonomyLevel::default(),
-        );
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let prompt_ctx = crate::agent::prompt::PromptContext {
+            workspace_dir: workspace.path(),
+            model_name: "test-model",
+            tools: &tools,
+            skills: &initial_skills,
+            skills_prompt_mode: config.skills.prompt_injection_mode,
+            identity_config: Some(&config.identity),
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::default(),
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
+        };
+        let initial_system_prompt = crate::agent::prompt::build_system_prompt(&prompt_ctx).unwrap();
         assert!(
             !initial_system_prompt.contains("refresh-test"),
             "initial prompt should not contain the new skill before it exists"
@@ -9131,7 +8378,25 @@ This is an example JSON object for profile settings."#;
             aieos_inline: None,
         };
 
-        let prompt = build_system_prompt(tmp.path(), "model", &[], &[], Some(&config), None);
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let ctx = crate::agent::prompt::PromptContext {
+            workspace_dir: tmp.path(),
+            model_name: "model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: Some(&config),
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::default(),
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
+        };
+        let prompt = crate::agent::prompt::build_system_prompt(&ctx).unwrap();
 
         // Should contain AIEOS sections
         assert!(prompt.contains("## Identity"));
@@ -9152,7 +8417,6 @@ This is an example JSON object for profile settings."#;
         // Should NOT contain OpenClaw bootstrap file headers
         assert!(!prompt.contains("### SOUL.md"));
         assert!(!prompt.contains("### IDENTITY.md"));
-        assert!(!prompt.contains("[File not found"));
     }
 
     #[test]
@@ -9165,14 +8429,26 @@ This is an example JSON object for profile settings."#;
             aieos_inline: Some(r#"{"identity":{"names":{"first":"Claw"}}}"#.into()),
         };
 
-        let prompt = build_system_prompt(
-            std::env::temp_dir().as_path(),
-            "model",
-            &[],
-            &[],
-            Some(&config),
-            None,
-        );
+        let tmp_dir = std::env::temp_dir();
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let ctx = crate::agent::prompt::PromptContext {
+            workspace_dir: tmp_dir.as_path(),
+            model_name: "model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: Some(&config),
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::default(),
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
+        };
+        let prompt = crate::agent::prompt::build_system_prompt(&ctx).unwrap();
 
         assert!(prompt.contains("**Name:** Claw"));
         assert!(prompt.contains("## Identity"));
@@ -9189,10 +8465,27 @@ This is an example JSON object for profile settings."#;
         };
 
         let ws = make_workspace();
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], Some(&config), None);
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let ctx = crate::agent::prompt::PromptContext {
+            workspace_dir: ws.path(),
+            model_name: "model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: Some(&config),
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::default(),
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
+        };
+        let prompt = crate::agent::prompt::build_system_prompt(&ctx).unwrap();
 
-        // Should fall back to OpenClaw format when AIEOS file is not found
-        // (Error is logged to stderr with filename, not included in prompt)
+        // Should fall back to OpenClaw personality files when AIEOS file is not found
         assert!(prompt.contains("### SOUL.md"));
     }
 
@@ -9208,7 +8501,25 @@ This is an example JSON object for profile settings."#;
         };
 
         let ws = make_workspace();
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], Some(&config), None);
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let ctx = crate::agent::prompt::PromptContext {
+            workspace_dir: ws.path(),
+            model_name: "model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: Some(&config),
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::default(),
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
+        };
+        let prompt = crate::agent::prompt::build_system_prompt(&ctx).unwrap();
 
         // Should use OpenClaw format (not configured for AIEOS)
         assert!(prompt.contains("### SOUL.md"));
@@ -9226,7 +8537,25 @@ This is an example JSON object for profile settings."#;
         };
 
         let ws = make_workspace();
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], Some(&config), None);
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let ctx = crate::agent::prompt::PromptContext {
+            workspace_dir: ws.path(),
+            model_name: "model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: Some(&config),
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::default(),
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
+        };
+        let prompt = crate::agent::prompt::build_system_prompt(&ctx).unwrap();
 
         // Should use OpenClaw format even if aieos_path is set
         assert!(prompt.contains("### SOUL.md"));
@@ -9237,8 +8566,7 @@ This is an example JSON object for profile settings."#;
     #[test]
     fn none_identity_config_uses_openclaw() {
         let ws = make_workspace();
-        // Pass None for identity config
-        let prompt = build_system_prompt(ws.path(), "model", &[], &[], None, None);
+        let prompt = make_prompt(ws.path(), "model");
 
         // Should use OpenClaw format
         assert!(prompt.contains("### SOUL.md"));

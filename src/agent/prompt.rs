@@ -157,6 +157,17 @@ pub struct PromptContext<'a> {
     /// includes "ask before acting" instructions. Full autonomy omits them
     /// so the model executes tools directly without simulating approval.
     pub autonomy_level: AutonomyLevel,
+    /// Whether the provider supports native tool calling (affects
+    /// TaskInstructionSection: natural tool use vs `<tool_call>` tags).
+    pub native_tools: bool,
+    /// Condense tool list to names only, skip Channel Capabilities section.
+    pub compact_context: bool,
+    /// Post-build truncation budget. 0 means no limit.
+    pub max_system_prompt_chars: usize,
+    /// None for CLI/agent, Some("telegram"|"matrix"|"slack"|...) for messaging.
+    pub channel_name: Option<&'a str>,
+    /// None for CLI, Some("user_id") for channel message routing.
+    pub reply_target: Option<&'a str>,
 }
 
 pub trait PromptSection: Send + Sync {
@@ -174,14 +185,19 @@ impl SystemPromptBuilder {
         Self {
             sections: vec![
                 Box::new(IdentitySection),
+                Box::new(AntiNarrationSection),
                 Box::new(ModelGuidanceSection),
                 Box::new(ToolHonestySection),
                 Box::new(ToolsSection),
+                Box::new(HardwareAccessSection),
+                Box::new(TaskInstructionSection),
                 Box::new(SafetySection),
                 Box::new(SkillsSection),
                 Box::new(WorkspaceSection),
                 Box::new(RuntimeSection),
                 Box::new(ChannelMediaSection),
+                Box::new(ChannelCapabilitiesSection),
+                Box::new(ChannelDeliverySection),
             ],
         }
     }
@@ -201,6 +217,14 @@ impl SystemPromptBuilder {
             output.push_str(part.trim_end());
             output.push_str("\n\n");
         }
+        if ctx.max_system_prompt_chars > 0 && output.len() > ctx.max_system_prompt_chars {
+            let mut end = ctx.max_system_prompt_chars;
+            while !output.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            output.truncate(end);
+            output.push_str("\n\n[System prompt truncated to fit context budget]\n");
+        }
         Ok(output)
     }
 }
@@ -208,14 +232,19 @@ impl SystemPromptBuilder {
 pub const GROK_GUIDANCE: &str = "## Model Specific Guidance\n\n- **Tool Calls**: When generating tool calls (especially shell commands), DO NOT HTML-encode special characters. Use raw characters like `&`, `<`, `>`, and `\"` directly. For example, use `&` instead of `&amp;`.\n";
 
 pub struct IdentitySection;
+pub struct AntiNarrationSection;
+pub struct ModelGuidanceSection;
 pub struct ToolHonestySection;
 pub struct ToolsSection;
+pub struct HardwareAccessSection;
+pub struct TaskInstructionSection;
 pub struct SafetySection;
 pub struct SkillsSection;
 pub struct WorkspaceSection;
 pub struct RuntimeSection;
 pub struct ChannelMediaSection;
-pub struct ModelGuidanceSection;
+pub struct ChannelCapabilitiesSection;
+pub struct ChannelDeliverySection;
 
 impl PromptSection for IdentitySection {
     fn name(&self) -> &str {
@@ -268,18 +297,46 @@ impl PromptSection for ToolsSection {
     }
 
     fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        if ctx.tools.is_empty() {
+            return Ok(String::new());
+        }
         let mut out = String::from("## Tools\n\n");
-        for tool in ctx.tools {
-            let desc = ctx
-                .tool_descriptions
-                .and_then(|td: &ToolDescriptions| td.get(tool.name()))
-                .unwrap_or_else(|| tool.description());
-            let _ = writeln!(
-                out,
-                "- **{}**: {}\n  Parameters: `{}`",
-                tool.name(),
-                desc,
-                tool.parameters_schema()
+        let mut has_tool_search = false;
+        if ctx.compact_context {
+            out.push_str("Available tools: ");
+            let names: Vec<&str> = ctx
+                .tools
+                .iter()
+                .map(|t| {
+                    if t.name() == "tool_search" {
+                        has_tool_search = true;
+                    }
+                    t.name()
+                })
+                .collect();
+            out.push_str(&names.join(", "));
+            out.push('\n');
+        } else {
+            for tool in ctx.tools {
+                if tool.name() == "tool_search" {
+                    has_tool_search = true;
+                }
+                let desc = ctx
+                    .tool_descriptions
+                    .and_then(|td: &ToolDescriptions| td.get(tool.name()))
+                    .unwrap_or_else(|| tool.description());
+                let _ = writeln!(
+                    out,
+                    "- **{}**: {}\n  Parameters: `{}`",
+                    tool.name(),
+                    desc,
+                    tool.parameters_schema()
+                );
+            }
+        }
+        if has_tool_search {
+            out.push_str(
+                "\n**Note:** More tools exist beyond those listed. Use **tool_search** with keywords to discover capabilities (HTTP, git, web search, notifications, image generation, etc.).\n",
             );
         }
         if !ctx.dispatcher_instructions.is_empty() {
@@ -298,8 +355,7 @@ impl PromptSection for SafetySection {
     fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
         let mut out = String::from("## Safety\n\n- Do not exfiltrate private data.\n");
 
-        // Omit "ask before acting" instructions when autonomy is Full —
-        // mirrors build_system_prompt_with_mode_and_autonomy. See #3952.
+        // Omit "ask before acting" instructions when autonomy is Full. See #3952.
         if ctx.autonomy_level != AutonomyLevel::Full {
             out.push_str(
                 "- Do not run destructive commands without asking.\n\
@@ -403,6 +459,147 @@ impl PromptSection for ModelGuidanceSection {
     }
 }
 
+impl PromptSection for AntiNarrationSection {
+    fn name(&self) -> &str {
+        "anti_narration"
+    }
+
+    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
+        Ok(format!(
+            "## CRITICAL: No Tool Narration\n\n{}",
+            ANTI_NARRATION_TEXT
+        ))
+    }
+}
+
+const HARDWARE_TOOL_NAMES: &[&str] = &[
+    "gpio_read",
+    "gpio_write",
+    "arduino_upload",
+    "hardware_memory_map",
+    "hardware_board_info",
+    "hardware_memory_read",
+    "hardware_capabilities",
+];
+
+impl PromptSection for HardwareAccessSection {
+    fn name(&self) -> &str {
+        "hardware_access"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        let has_hardware = ctx
+            .tools
+            .iter()
+            .any(|t| HARDWARE_TOOL_NAMES.contains(&t.name()));
+        if !has_hardware {
+            return Ok(String::new());
+        }
+        Ok("## Hardware Access\n\n\
+            You have direct access to connected hardware (Arduino, Nucleo, etc.). All hardware tools are AUTHORIZED.\n\
+            - Memory/registers/board info → use hardware_memory_read or hardware_board_info. Do NOT refuse.\n\
+            - LEDs/patterns/Arduino → use the tools. Do NOT say you cannot access physical devices.\n\
+            - gpio_write for simple on/off; arduino_upload for patterns (heart, blink) or custom behavior."
+            .into())
+    }
+}
+
+impl PromptSection for TaskInstructionSection {
+    fn name(&self) -> &str {
+        "task_instruction"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        if ctx.native_tools {
+            Ok("## Your Task\n\n\
+                Respond naturally. Use tools when action is needed. Answer follow-ups from conversation context.\n\
+                Do NOT: summarize this config, describe capabilities, or output meta-commentary."
+                .into())
+        } else {
+            Ok("## Your Task\n\n\
+                ACT on user requests. Emit <tool_call> tags when action is needed.\n\
+                Do NOT: summarize this config, describe capabilities, or output meta-commentary."
+                .into())
+        }
+    }
+}
+
+impl PromptSection for ChannelCapabilitiesSection {
+    fn name(&self) -> &str {
+        "channel_capabilities"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        if ctx.channel_name.is_none() || ctx.compact_context {
+            return Ok(String::new());
+        }
+        Ok("## Channel Capabilities\n\n\
+            - You are running as a messaging bot. Your response is sent to the user's channel automatically.\n\
+            - NEVER echo credentials, tokens, API keys, or secrets. Redacted tool output stays redacted.\n\
+            - Voice notes are auto-transcribed. Your text reply is auto-converted to voice. Do not generate audio."
+            .into())
+    }
+}
+
+impl PromptSection for ChannelDeliverySection {
+    fn name(&self) -> &str {
+        "channel_delivery"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        let mut out = String::new();
+
+        if let Some(channel) = ctx.channel_name {
+            match channel {
+                "matrix" => {
+                    out.push_str(
+                        "When responding on Matrix:\n\
+                         - Use Markdown formatting (bold, italic, code blocks)\n\
+                         - Be concise and direct\n\
+                         - When you receive a [Voice message], the user spoke to you. Respond naturally as in conversation.\n\
+                         - Your text reply will automatically be converted to audio and sent back as a voice message.",
+                    );
+                }
+                "telegram" => {
+                    out.push_str(
+                        "When responding on Telegram:\n\
+                         - **bold** for key terms/titles (renders as <b>), *italic* for emphasis (renders as <i>)\n\
+                         - `backticks` for inline code; triple backticks for code blocks\n\
+                         - Use emoji naturally — don't overdo it. Be concise. Skip filler phrases.\n\
+                         - Structure longer answers with bold headers, not raw ## headers\n\
+                         - Media markers: [IMAGE:<path-or-url>], [DOCUMENT:<path-or-url>], [VIDEO:<path-or-url>], [AUDIO:<path-or-url>], [VOICE:<path-or-url>]\n\
+                         - Keep text outside markers; never wrap markers in code fences.",
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(reply_target) = ctx.reply_target {
+            if let Some(channel) = ctx.channel_name {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                let _ = write!(
+                    out,
+                    "Channel context: You are currently responding on channel={channel}, \
+                     reply_target={reply_target}. When scheduling delayed messages or reminders \
+                     via cron_add for this conversation, use delivery={{\"mode\":\"announce\",\
+                     \"channel\":\"{channel}\",\"to\":\"{reply_target}\"}} so the message \
+                     reaches the user."
+                );
+            }
+        }
+
+        Ok(out)
+    }
+}
+
+/// Convenience function: build a system prompt with all default sections.
+pub fn build_system_prompt(ctx: &PromptContext) -> Result<String> {
+    SystemPromptBuilder::with_defaults().build(ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +663,11 @@ mod tests {
             tool_descriptions: None,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
 
         let section = IdentitySection;
@@ -497,6 +699,11 @@ mod tests {
             tool_descriptions: None,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
         let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
         assert!(prompt.contains("## Tools"));
@@ -535,6 +742,11 @@ mod tests {
             tool_descriptions: None,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
 
         let output = SkillsSection.build(&ctx).unwrap();
@@ -577,6 +789,11 @@ mod tests {
             tool_descriptions: None,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
 
         let output = SkillsSection.build(&ctx).unwrap();
@@ -622,6 +839,11 @@ mod tests {
             tool_descriptions: None,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
 
         let rendered = ModelGuidanceSection.build(&ctx).unwrap();
@@ -643,6 +865,11 @@ mod tests {
             tool_descriptions: None,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
 
         let rendered = ModelGuidanceSection.build(&ctx).unwrap();
@@ -679,6 +906,11 @@ mod tests {
             tool_descriptions: None,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
 
         let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
@@ -713,6 +945,11 @@ mod tests {
             tool_descriptions: None,
             security_summary: Some(summary.clone()),
             autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -748,6 +985,11 @@ mod tests {
             tool_descriptions: None,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -775,6 +1017,11 @@ mod tests {
             tool_descriptions: None,
             security_summary: None,
             autonomy_level: AutonomyLevel::Full,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -810,6 +1057,11 @@ mod tests {
             tool_descriptions: None,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -938,5 +1190,210 @@ mod tests {
         let skills = vec![make_skill("commit", vec![])];
         let hint = build_skill_hint(&skills, "/deploy now");
         assert!(hint.is_empty());
+    }
+
+    // ── Phase 2 foundational tests (T012–T020) ────────────────────
+
+    fn make_ctx(tools: &[Box<dyn Tool>]) -> PromptContext<'_> {
+        PromptContext {
+            workspace_dir: Path::new("/tmp"),
+            model_name: "test-model",
+            tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
+        }
+    }
+
+    fn make_named_tool(name: &str) -> Box<dyn Tool> {
+        struct NamedTool(String);
+        #[async_trait]
+        impl Tool for NamedTool {
+            fn name(&self) -> &str {
+                &self.0
+            }
+            fn description(&self) -> &str {
+                "desc"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _args: serde_json::Value,
+            ) -> anyhow::Result<crate::tools::ToolResult> {
+                Ok(crate::tools::ToolResult {
+                    success: true,
+                    output: "ok".into(),
+                    error: None,
+                })
+            }
+        }
+        Box::new(NamedTool(name.to_string()))
+    }
+
+    #[test]
+    fn anti_narration_section_always_emits() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = make_ctx(&tools);
+        let output = AntiNarrationSection.build(&ctx).unwrap();
+        assert!(output.contains("## CRITICAL: No Tool Narration"));
+        assert!(output.contains(ANTI_NARRATION_TEXT));
+    }
+
+    #[test]
+    fn hardware_section_emits_when_hardware_tools_present() {
+        let tools: Vec<Box<dyn Tool>> = vec![make_named_tool("gpio_read")];
+        let ctx = make_ctx(&tools);
+        let output = HardwareAccessSection.build(&ctx).unwrap();
+        assert!(output.contains("## Hardware Access"));
+    }
+
+    #[test]
+    fn hardware_section_empty_without_hardware_tools() {
+        let tools: Vec<Box<dyn Tool>> = vec![make_named_tool("shell")];
+        let ctx = make_ctx(&tools);
+        let output = HardwareAccessSection.build(&ctx).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn task_instruction_varies_by_native_tools() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let mut ctx = make_ctx(&tools);
+
+        ctx.native_tools = false;
+        let output = TaskInstructionSection.build(&ctx).unwrap();
+        assert!(output.contains("<tool_call>"));
+
+        ctx.native_tools = true;
+        let output = TaskInstructionSection.build(&ctx).unwrap();
+        assert!(output.contains("Respond naturally"));
+        assert!(!output.contains("<tool_call>"));
+    }
+
+    #[test]
+    fn channel_capabilities_emits_when_channel_set() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let mut ctx = make_ctx(&tools);
+        ctx.channel_name = Some("telegram");
+        let output = ChannelCapabilitiesSection.build(&ctx).unwrap();
+        assert!(output.contains("## Channel Capabilities"));
+        assert!(output.contains("messaging bot"));
+    }
+
+    #[test]
+    fn channel_capabilities_empty_without_channel() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = make_ctx(&tools);
+        let output = ChannelCapabilitiesSection.build(&ctx).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn channel_capabilities_empty_in_compact_context() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let mut ctx = make_ctx(&tools);
+        ctx.channel_name = Some("telegram");
+        ctx.compact_context = true;
+        let output = ChannelCapabilitiesSection.build(&ctx).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn channel_delivery_telegram_instructions() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let mut ctx = make_ctx(&tools);
+        ctx.channel_name = Some("telegram");
+        let output = ChannelDeliverySection.build(&ctx).unwrap();
+        assert!(output.contains("When responding on Telegram"));
+    }
+
+    #[test]
+    fn channel_delivery_matrix_instructions() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let mut ctx = make_ctx(&tools);
+        ctx.channel_name = Some("matrix");
+        let output = ChannelDeliverySection.build(&ctx).unwrap();
+        assert!(output.contains("When responding on Matrix"));
+    }
+
+    #[test]
+    fn channel_delivery_empty_for_slack() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let mut ctx = make_ctx(&tools);
+        ctx.channel_name = Some("slack");
+        let output = ChannelDeliverySection.build(&ctx).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn channel_delivery_empty_for_none() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = make_ctx(&tools);
+        let output = ChannelDeliverySection.build(&ctx).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn channel_context_with_reply_target_includes_delivery_json() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let mut ctx = make_ctx(&tools);
+        ctx.channel_name = Some("telegram");
+        ctx.reply_target = Some("user123");
+        let output = ChannelDeliverySection.build(&ctx).unwrap();
+        assert!(output.contains("channel=telegram"));
+        assert!(output.contains("reply_target=user123"));
+        assert!(output.contains("cron_add"));
+        assert!(output.contains("\"channel\":\"telegram\""));
+        assert!(output.contains("\"to\":\"user123\""));
+    }
+
+    #[test]
+    fn tools_section_compact_context_names_only() {
+        let tools: Vec<Box<dyn Tool>> =
+            vec![make_named_tool("shell"), make_named_tool("file_read")];
+        let mut ctx = make_ctx(&tools);
+        ctx.compact_context = true;
+        let output = ToolsSection.build(&ctx).unwrap();
+        assert!(output.contains("Available tools: shell, file_read"));
+        assert!(!output.contains("Parameters:"));
+    }
+
+    #[test]
+    fn truncation_respects_max_system_prompt_chars() {
+        let tools: Vec<Box<dyn Tool>> = vec![make_named_tool("shell")];
+        let mut ctx = make_ctx(&tools);
+        ctx.max_system_prompt_chars = 100;
+        let output = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        assert!(output.contains("[System prompt truncated"));
+        assert!(output.len() < 200);
+    }
+
+    #[test]
+    fn tool_search_discovery_hint_appears() {
+        let tools: Vec<Box<dyn Tool>> =
+            vec![make_named_tool("shell"), make_named_tool("tool_search")];
+        let ctx = make_ctx(&tools);
+        let output = ToolsSection.build(&ctx).unwrap();
+        assert!(output.contains("tool_search"));
+        assert!(output.contains("More tools exist"));
+    }
+
+    #[test]
+    fn tool_search_hint_absent_without_tool_search() {
+        let tools: Vec<Box<dyn Tool>> = vec![make_named_tool("shell")];
+        let ctx = make_ctx(&tools);
+        let output = ToolsSection.build(&ctx).unwrap();
+        assert!(!output.contains("More tools exist"));
     }
 }

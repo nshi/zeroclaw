@@ -1103,14 +1103,25 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
     // workspace-aware system context before model invocation.
     let system_prompt = {
         let config_guard = state.config.lock();
-        crate::channels::build_system_prompt(
-            &config_guard.workspace_dir,
-            &state.model,
-            &[], // tools - empty for simple chat
-            &[], // skills
-            Some(&config_guard.identity),
-            None, // bootstrap_max_chars - use default
-        )
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let ctx = crate::agent::prompt::PromptContext {
+            workspace_dir: &config_guard.workspace_dir,
+            model_name: &state.model,
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: Some(&config_guard.identity),
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: crate::security::AutonomyLevel::default(),
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
+        };
+        crate::agent::prompt::build_system_prompt(&ctx).unwrap_or_default()
     };
 
     let mut messages = Vec::with_capacity(1 + user_messages.len());
