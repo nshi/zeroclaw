@@ -168,6 +168,8 @@ pub struct PromptContext<'a> {
     pub channel_name: Option<&'a str>,
     /// None for CLI, Some("user_id") for channel message routing.
     pub reply_target: Option<&'a str>,
+    /// Pre-rendered deferred MCP tools section. Empty = skip.
+    pub deferred_tools_text: &'a str,
 }
 
 pub trait PromptSection: Send + Sync {
@@ -198,6 +200,8 @@ impl SystemPromptBuilder {
                 Box::new(ChannelMediaSection),
                 Box::new(ChannelCapabilitiesSection),
                 Box::new(ChannelDeliverySection),
+                Box::new(ToolUseProtocolSection),
+                Box::new(DeferredToolsSection),
             ],
         }
     }
@@ -245,6 +249,8 @@ pub struct RuntimeSection;
 pub struct ChannelMediaSection;
 pub struct ChannelCapabilitiesSection;
 pub struct ChannelDeliverySection;
+pub struct ToolUseProtocolSection;
+pub struct DeferredToolsSection;
 
 impl PromptSection for IdentitySection {
     fn name(&self) -> &str {
@@ -274,7 +280,22 @@ impl PromptSection for IdentitySection {
         }
 
         // Use the personality module for structured file loading.
-        let profile = personality::load_personality(ctx.workspace_dir);
+        // Exclude HEARTBEAT.md for channel prompts — it causes LLMs to emit
+        // spurious HEARTBEAT_OK acknowledgments in channel conversations.
+        let profile = if ctx.channel_name.is_some() {
+            const CHANNEL_FILES: &[&str] = &[
+                "SOUL.md",
+                "IDENTITY.md",
+                "USER.md",
+                "AGENTS.md",
+                "TOOLS.md",
+                "BOOTSTRAP.md",
+                "MEMORY.md",
+            ];
+            personality::load_personality_files(ctx.workspace_dir, CHANNEL_FILES)
+        } else {
+            personality::load_personality(ctx.workspace_dir)
+        };
         prompt.push_str(&profile.render());
 
         Ok(prompt)
@@ -300,27 +321,26 @@ impl PromptSection for ToolsSection {
         if ctx.tools.is_empty() {
             return Ok(String::new());
         }
+        // When !native_tools, ToolUseProtocolSection emits the full tool
+        // catalog with XML call format, so skip the detailed listing here
+        // to avoid duplicating every tool's description and schema.
+        if !ctx.native_tools && !ctx.compact_context {
+            let mut out = String::new();
+            if !ctx.dispatcher_instructions.is_empty() {
+                out.push_str("## Tools\n\n");
+                out.push_str(ctx.dispatcher_instructions);
+            }
+            return Ok(out);
+        }
         let mut out = String::from("## Tools\n\n");
-        let mut has_tool_search = false;
+        let has_tool_search = ctx.tools.iter().any(|t| t.name() == "tool_search");
         if ctx.compact_context {
             out.push_str("Available tools: ");
-            let names: Vec<&str> = ctx
-                .tools
-                .iter()
-                .map(|t| {
-                    if t.name() == "tool_search" {
-                        has_tool_search = true;
-                    }
-                    t.name()
-                })
-                .collect();
+            let names: Vec<&str> = ctx.tools.iter().map(|t| t.name()).collect();
             out.push_str(&names.join(", "));
             out.push('\n');
         } else {
             for tool in ctx.tools {
-                if tool.name() == "tool_search" {
-                    has_tool_search = true;
-                }
                 let desc = ctx
                     .tool_descriptions
                     .and_then(|td: &ToolDescriptions| td.get(tool.name()))
@@ -376,11 +396,15 @@ impl PromptSection for SafetySection {
             out.push_str(summary);
         }
 
-        let _ = write!(
-            out,
-            "\n\n## Efficiency\n\n**Tool Calls**:\n{}",
-            TOOL_CALL_INSTRUCTIONS
-        );
+        // For non-native providers, ToolUseProtocolSection already includes
+        // TOOL_CALL_INSTRUCTIONS alongside the <tool_call> format guide.
+        if ctx.native_tools {
+            let _ = write!(
+                out,
+                "\n\n## Efficiency\n\n**Tool Calls**:\n{}",
+                TOOL_CALL_INSTRUCTIONS
+            );
+        }
 
         Ok(out)
     }
@@ -595,9 +619,122 @@ impl PromptSection for ChannelDeliverySection {
     }
 }
 
+impl PromptSection for ToolUseProtocolSection {
+    fn name(&self) -> &str {
+        "tool_use_protocol"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        if ctx.native_tools || ctx.tools.is_empty() {
+            return Ok(String::new());
+        }
+        let mut out = String::from("## Tool Use Protocol\n\n");
+        out.push_str("Wrap a JSON object in <tool_call></tool_call> tags:\n\n");
+        out.push_str("```\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n</tool_call>\n```\n\n");
+        out.push_str("CRITICAL: Output actual <tool_call> tags — never describe steps.\n");
+        out.push_str(TOOL_CALL_INSTRUCTIONS);
+        out.push_str("\n\n");
+        out.push_str("Example: User says \"what's the date?\" → respond:\n<tool_call>\n{\"name\":\"shell\",\"arguments\":{\"command\":\"date\"}}\n</tool_call>\n\n");
+        out.push_str("Multiple tool calls per response allowed. Results appear in <tool_result> tags. Continue reasoning until you can give a final answer.\n\n");
+        out.push_str("### Available Tools\n\n");
+
+        let has_tool_search = ctx.tools.iter().any(|t| t.name() == "tool_search");
+        for tool in ctx.tools {
+            let desc = ctx
+                .tool_descriptions
+                .and_then(|td| td.get(tool.name()))
+                .unwrap_or_else(|| tool.description());
+            let _ = writeln!(
+                out,
+                "**{}**: {}\nParameters: `{}`\n",
+                tool.name(),
+                desc,
+                tool.parameters_schema()
+            );
+        }
+        if has_tool_search {
+            out.push_str(
+                "**Note:** More tools exist beyond those listed. Use **tool_search** with keywords to discover capabilities (HTTP, git, web search, notifications, image generation, etc.).\n",
+            );
+        }
+
+        Ok(out)
+    }
+}
+
+impl PromptSection for DeferredToolsSection {
+    fn name(&self) -> &str {
+        "deferred_tools"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        if ctx.deferred_tools_text.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(ctx.deferred_tools_text.to_string())
+    }
+}
+
 /// Convenience function: build a system prompt with all default sections.
 pub fn build_system_prompt(ctx: &PromptContext) -> Result<String> {
     SystemPromptBuilder::with_defaults().build(ctx)
+}
+
+/// Test helpers for constructing `PromptContext` and mock tools in other modules.
+#[cfg(test)]
+pub mod test_helpers {
+    use super::*;
+    use crate::tools::traits::Tool;
+
+    /// Create a mock tool with the given name (description = "desc", empty schema).
+    pub fn make_named_tool(name: &str) -> Box<dyn Tool> {
+        struct NamedTool(String);
+        #[async_trait::async_trait]
+        impl Tool for NamedTool {
+            fn name(&self) -> &str {
+                &self.0
+            }
+            fn description(&self) -> &str {
+                "desc"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _args: serde_json::Value,
+            ) -> anyhow::Result<crate::tools::ToolResult> {
+                Ok(crate::tools::ToolResult {
+                    success: true,
+                    output: "ok".into(),
+                    error: None,
+                })
+            }
+        }
+        Box::new(NamedTool(name.to_string()))
+    }
+
+    /// Build a default `PromptContext` with empty tools/skills and sensible defaults.
+    pub fn make_test_ctx(tools: &[Box<dyn Tool>]) -> PromptContext<'_> {
+        PromptContext {
+            workspace_dir: std::path::Path::new("/tmp"),
+            model_name: "test-model",
+            tools,
+            skills: &[],
+            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            tool_descriptions: None,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::Supervised,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
+            deferred_tools_text: "",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -668,6 +805,7 @@ mod tests {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
 
         let section = IdentitySection;
@@ -704,6 +842,7 @@ mod tests {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
         let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
         assert!(prompt.contains("## Tools"));
@@ -747,6 +886,7 @@ mod tests {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
 
         let output = SkillsSection.build(&ctx).unwrap();
@@ -794,6 +934,7 @@ mod tests {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
 
         let output = SkillsSection.build(&ctx).unwrap();
@@ -844,6 +985,7 @@ mod tests {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
 
         let rendered = ModelGuidanceSection.build(&ctx).unwrap();
@@ -870,6 +1012,7 @@ mod tests {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
 
         let rendered = ModelGuidanceSection.build(&ctx).unwrap();
@@ -911,6 +1054,7 @@ mod tests {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
 
         let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
@@ -950,6 +1094,7 @@ mod tests {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -990,6 +1135,7 @@ mod tests {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -1022,6 +1168,7 @@ mod tests {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -1062,6 +1209,7 @@ mod tests {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -1194,52 +1342,7 @@ mod tests {
 
     // ── Phase 2 foundational tests (T012–T020) ────────────────────
 
-    fn make_ctx(tools: &[Box<dyn Tool>]) -> PromptContext<'_> {
-        PromptContext {
-            workspace_dir: Path::new("/tmp"),
-            model_name: "test-model",
-            tools,
-            skills: &[],
-            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
-            identity_config: None,
-            dispatcher_instructions: "",
-            tool_descriptions: None,
-            security_summary: None,
-            autonomy_level: AutonomyLevel::Supervised,
-            native_tools: false,
-            compact_context: false,
-            max_system_prompt_chars: 0,
-            channel_name: None,
-            reply_target: None,
-        }
-    }
-
-    fn make_named_tool(name: &str) -> Box<dyn Tool> {
-        struct NamedTool(String);
-        #[async_trait]
-        impl Tool for NamedTool {
-            fn name(&self) -> &str {
-                &self.0
-            }
-            fn description(&self) -> &str {
-                "desc"
-            }
-            fn parameters_schema(&self) -> serde_json::Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(
-                &self,
-                _args: serde_json::Value,
-            ) -> anyhow::Result<crate::tools::ToolResult> {
-                Ok(crate::tools::ToolResult {
-                    success: true,
-                    output: "ok".into(),
-                    error: None,
-                })
-            }
-        }
-        Box::new(NamedTool(name.to_string()))
-    }
+    use super::test_helpers::{make_named_tool, make_test_ctx as make_ctx};
 
     #[test]
     fn anti_narration_section_always_emits() {
@@ -1384,7 +1487,7 @@ mod tests {
         let tools: Vec<Box<dyn Tool>> =
             vec![make_named_tool("shell"), make_named_tool("tool_search")];
         let ctx = make_ctx(&tools);
-        let output = ToolsSection.build(&ctx).unwrap();
+        let output = ToolUseProtocolSection.build(&ctx).unwrap();
         assert!(output.contains("tool_search"));
         assert!(output.contains("More tools exist"));
     }
@@ -1393,7 +1496,7 @@ mod tests {
     fn tool_search_hint_absent_without_tool_search() {
         let tools: Vec<Box<dyn Tool>> = vec![make_named_tool("shell")];
         let ctx = make_ctx(&tools);
-        let output = ToolsSection.build(&ctx).unwrap();
+        let output = ToolUseProtocolSection.build(&ctx).unwrap();
         assert!(!output.contains("More tools exist"));
     }
 }

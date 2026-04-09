@@ -1120,6 +1120,7 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
         crate::agent::prompt::build_system_prompt(&ctx).unwrap_or_default()
     };

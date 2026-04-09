@@ -1,7 +1,6 @@
 use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
 use crate::config::Config;
 use crate::cost::types::BudgetCheck;
-use crate::i18n::ToolDescriptions;
 use crate::memory::{self, Memory, MemoryCategory, decay};
 use crate::multimodal;
 use crate::observability::{self, Observer, ObserverEvent, runtime_trace};
@@ -3451,39 +3450,6 @@ pub(crate) async fn run_tool_call_loop(
     }
 }
 
-/// Build the tool instruction block for the system prompt so the LLM knows
-/// how to invoke tools.
-pub(crate) fn build_tool_instructions(
-    tools_registry: &[Box<dyn Tool>],
-    tool_descriptions: Option<&ToolDescriptions>,
-) -> String {
-    let mut instructions = String::new();
-    instructions.push_str("\n## Tool Use Protocol\n\n");
-    instructions.push_str("Wrap a JSON object in <tool_call></tool_call> tags:\n\n");
-    instructions.push_str("```\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n</tool_call>\n```\n\n");
-    instructions.push_str("CRITICAL: Output actual <tool_call> tags — never describe steps.\n");
-    instructions.push_str(crate::agent::prompt::TOOL_CALL_INSTRUCTIONS);
-    instructions.push_str("\n\n");
-    instructions.push_str("Example: User says \"what's the date?\" → respond:\n<tool_call>\n{\"name\":\"shell\",\"arguments\":{\"command\":\"date\"}}\n</tool_call>\n\n");
-    instructions.push_str("Multiple tool calls per response allowed. Results appear in <tool_result> tags. Continue reasoning until you can give a final answer.\n\n");
-    instructions.push_str("### Available Tools\n\n");
-
-    for tool in tools_registry {
-        let desc = tool_descriptions
-            .and_then(|td| td.get(tool.name()))
-            .unwrap_or_else(|| tool.description());
-        let _ = writeln!(
-            instructions,
-            "**{}**: {}\nParameters: `{}`\n",
-            tool.name(),
-            desc,
-            tool.parameters_schema()
-        );
-    }
-
-    instructions
-}
-
 // ── CLI Entrypoint ───────────────────────────────────────────────────────
 // Wires up all subsystems (observer, runtime, security, memory, tools,
 // provider, hardware RAG, peripherals) and enters either single-shot or
@@ -3760,20 +3726,10 @@ pub async fn run(
         max_system_prompt_chars: config.agent.max_system_prompt_chars,
         channel_name: None,
         reply_target: None,
+        deferred_tools_text: &deferred_section,
     };
     let mut system_prompt =
         crate::agent::prompt::build_system_prompt(&prompt_ctx).unwrap_or_default();
-
-    // Append structured tool-use instructions with schemas (only for non-native providers)
-    if !native_tools {
-        system_prompt.push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
-    }
-
-    // Append deferred MCP tool names so the LLM knows what is available
-    if !deferred_section.is_empty() {
-        system_prompt.push('\n');
-        system_prompt.push_str(&deferred_section);
-    }
 
     // ── Approval manager (supervised mode) ───────────────────────
     let approval_manager = if interactive {
@@ -4550,16 +4506,10 @@ pub async fn process_message(
         max_system_prompt_chars: config.agent.max_system_prompt_chars,
         channel_name: None,
         reply_target: None,
+        deferred_tools_text: &deferred_section,
     };
     let mut system_prompt =
         crate::agent::prompt::build_system_prompt(&prompt_ctx).unwrap_or_default();
-    if !native_tools {
-        system_prompt.push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
-    }
-    if !deferred_section.is_empty() {
-        system_prompt.push('\n');
-        system_prompt.push_str(&deferred_section);
-    }
 
     // ── Parse thinking directive from user message ─────────────
     let (thinking_directive, effective_message) =
@@ -7797,23 +7747,6 @@ Tail"#;
     }
 
     #[test]
-    fn build_tool_instructions_includes_all_tools() {
-        use crate::security::SecurityPolicy;
-        let security = Arc::new(SecurityPolicy::from_config(
-            &crate::config::AutonomyConfig::default(),
-            std::path::Path::new("/tmp"),
-        ));
-        let tools = tools::default_tools(security);
-        let instructions = build_tool_instructions(&tools, None);
-
-        assert!(instructions.contains("## Tool Use Protocol"));
-        assert!(instructions.contains("<tool_call>"));
-        assert!(instructions.contains("shell"));
-        assert!(instructions.contains("file_read"));
-        assert!(instructions.contains("file_write"));
-    }
-
-    #[test]
     fn tools_to_openai_format_produces_valid_schema() {
         use crate::security::SecurityPolicy;
         let security = Arc::new(SecurityPolicy::from_config(
@@ -8619,74 +8552,12 @@ Let me check the result."#;
     /// the output must contain ZERO XML protocol artifacts.
     #[test]
     fn native_tools_system_prompt_contains_zero_xml() {
-        use crate::agent::prompt::{PromptContext, build_system_prompt};
-
-        struct ShellTool;
-        struct FileReadTool;
-        #[async_trait::async_trait]
-        impl crate::tools::Tool for ShellTool {
-            fn name(&self) -> &str {
-                "shell"
-            }
-            fn description(&self) -> &str {
-                "Execute shell commands"
-            }
-            fn parameters_schema(&self) -> serde_json::Value {
-                serde_json::json!({"type":"object"})
-            }
-            async fn execute(
-                &self,
-                _: serde_json::Value,
-            ) -> anyhow::Result<crate::tools::ToolResult> {
-                Ok(crate::tools::ToolResult {
-                    success: true,
-                    output: "ok".into(),
-                    error: None,
-                })
-            }
-        }
-        #[async_trait::async_trait]
-        impl crate::tools::Tool for FileReadTool {
-            fn name(&self) -> &str {
-                "file_read"
-            }
-            fn description(&self) -> &str {
-                "Read files"
-            }
-            fn parameters_schema(&self) -> serde_json::Value {
-                serde_json::json!({"type":"object"})
-            }
-            async fn execute(
-                &self,
-                _: serde_json::Value,
-            ) -> anyhow::Result<crate::tools::ToolResult> {
-                Ok(crate::tools::ToolResult {
-                    success: true,
-                    output: "ok".into(),
-                    error: None,
-                })
-            }
-        }
+        use crate::agent::prompt::{build_system_prompt, test_helpers::make_named_tool};
 
         let tools: Vec<Box<dyn crate::tools::Tool>> =
-            vec![Box::new(ShellTool), Box::new(FileReadTool)];
-        let ctx = PromptContext {
-            workspace_dir: std::path::Path::new("/tmp"),
-            model_name: "test-model",
-            tools: &tools,
-            skills: &[],
-            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
-            identity_config: None,
-            dispatcher_instructions: "",
-            tool_descriptions: None,
-            security_summary: None,
-            autonomy_level: crate::security::AutonomyLevel::default(),
-            native_tools: true,
-            compact_context: false,
-            max_system_prompt_chars: 0,
-            channel_name: None,
-            reply_target: None,
-        };
+            vec![make_named_tool("shell"), make_named_tool("file_read")];
+        let mut ctx = crate::agent::prompt::test_helpers::make_test_ctx(&tools);
+        ctx.native_tools = true;
         let system_prompt = build_system_prompt(&ctx).unwrap();
 
         assert!(

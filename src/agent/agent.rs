@@ -617,6 +617,7 @@ impl Agent {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
         self.prompt_builder.build(&ctx)
     }

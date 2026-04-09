@@ -35,10 +35,9 @@ pub use traits::{Channel, SendMessage};
 pub use tts::{TtsManager, TtsProvider};
 
 use crate::agent::loop_::{
-    build_tool_instructions, clear_model_switch_request, get_model_switch_state,
-    is_model_switch_requested, run_tool_call_loop, scrub_credentials,
+    clear_model_switch_request, get_model_switch_state, is_model_switch_requested,
+    run_tool_call_loop, scrub_credentials,
 };
-use crate::agent::prompt::PromptSection;
 use crate::approval::ApprovalManager;
 use crate::config::Config;
 use crate::memory::{self, Memory};
@@ -273,6 +272,7 @@ struct ChannelCostTrackingState {
 }
 
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)]
 struct ChannelRuntimeContext {
     channels_by_name: Arc<HashMap<String, Arc<dyn Channel>>>,
     provider: Arc<dyn Provider>,
@@ -281,7 +281,9 @@ struct ChannelRuntimeContext {
     memory: Arc<dyn Memory>,
     tools_registry: Arc<Vec<Box<dyn Tool>>>,
     observer: Arc<dyn Observer>,
-    system_prompt: Arc<String>,
+    native_tools: bool,
+    deferred_tools_text: Arc<String>,
+    i18n_descs: Arc<crate::i18n::ToolDescriptions>,
     model: Arc<String>,
     model_routes: Arc<Vec<crate::config::ModelRouteConfig>>,
     temperature: f64,
@@ -323,6 +325,37 @@ struct ChannelRuntimeContext {
     context_token_budget: usize,
     debouncer: Arc<debounce::MessageDebouncer>,
     skills: Arc<Vec<crate::skills::Skill>>,
+}
+
+impl ChannelRuntimeContext {
+    /// Build a complete system prompt for the given per-message context.
+    fn build_system_prompt(
+        &self,
+        model_name: &str,
+        channel_name: &str,
+        reply_target: Option<&str>,
+        skills: &[crate::skills::Skill],
+    ) -> String {
+        let ctx = crate::agent::prompt::PromptContext {
+            workspace_dir: self.workspace_dir.as_ref(),
+            model_name,
+            tools: self.tools_registry.as_ref(),
+            skills,
+            skills_prompt_mode: self.prompt_config.skills.prompt_injection_mode,
+            identity_config: Some(&self.prompt_config.identity),
+            dispatcher_instructions: "",
+            tool_descriptions: Some(self.i18n_descs.as_ref()),
+            security_summary: None,
+            autonomy_level: self.autonomy_level,
+            native_tools: self.native_tools,
+            compact_context: self.prompt_config.agent.compact_context,
+            max_system_prompt_chars: self.prompt_config.agent.max_system_prompt_chars,
+            channel_name: Some(channel_name),
+            reply_target,
+            deferred_tools_text: &self.deferred_tools_text,
+        };
+        crate::agent::prompt::build_system_prompt(&ctx).unwrap_or_default()
+    }
 }
 
 #[derive(Clone)]
@@ -937,59 +970,17 @@ fn get_or_create_provider_session_id(
     }
 }
 
-fn replace_available_skills_section(base_prompt: &str, refreshed_skills: &str) -> String {
-    const SKILLS_HEADER: &str = "## Available Skills\n\n";
-    const SKILLS_END: &str = "</available_skills>";
-    const WORKSPACE_HEADER: &str = "## Workspace\n\n";
-
-    if let Some(start) = base_prompt.find(SKILLS_HEADER) {
-        if let Some(rel_end) = base_prompt[start..].find(SKILLS_END) {
-            let end = start + rel_end + SKILLS_END.len();
-            let tail = base_prompt[end..]
-                .strip_prefix("\n\n")
-                .unwrap_or(&base_prompt[end..]);
-
-            let mut refreshed = String::with_capacity(
-                base_prompt.len().saturating_sub(end.saturating_sub(start))
-                    + refreshed_skills.len()
-                    + 2,
-            );
-            refreshed.push_str(&base_prompt[..start]);
-            if !refreshed_skills.is_empty() {
-                refreshed.push_str(refreshed_skills);
-                refreshed.push_str("\n\n");
-            }
-            refreshed.push_str(tail);
-            return refreshed;
-        }
-    }
-
-    if refreshed_skills.is_empty() {
-        return base_prompt.to_string();
-    }
-
-    if let Some(workspace_start) = base_prompt.find(WORKSPACE_HEADER) {
-        let mut refreshed = String::with_capacity(base_prompt.len() + refreshed_skills.len() + 2);
-        refreshed.push_str(&base_prompt[..workspace_start]);
-        refreshed.push_str(refreshed_skills);
-        refreshed.push_str("\n\n");
-        refreshed.push_str(&base_prompt[workspace_start..]);
-        return refreshed;
-    }
-
-    format!("{base_prompt}\n\n{refreshed_skills}")
-}
-
-fn refreshed_new_session_system_prompt(ctx: &ChannelRuntimeContext) -> String {
-    let refreshed_skills = crate::skills::skills_to_prompt_with_mode(
-        &crate::skills::load_skills_with_config(
-            ctx.workspace_dir.as_ref(),
-            ctx.prompt_config.as_ref(),
-        ),
+fn refreshed_new_session_system_prompt(
+    ctx: &ChannelRuntimeContext,
+    model_name: &str,
+    channel_name: &str,
+    reply_target: Option<&str>,
+) -> String {
+    let fresh_skills = crate::skills::load_skills_with_config(
         ctx.workspace_dir.as_ref(),
-        ctx.prompt_config.skills.prompt_injection_mode,
+        ctx.prompt_config.as_ref(),
     );
-    replace_available_skills_section(ctx.system_prompt.as_str(), &refreshed_skills)
+    ctx.build_system_prompt(model_name, channel_name, reply_target, &fresh_skills)
 }
 
 fn compact_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) -> bool {
@@ -2570,66 +2561,23 @@ async fn process_channel_message(
         format!("{sender_memory}\n{group_memory}")
     };
 
-    // Use refreshed system prompt for new sessions (master's /new support),
-    // and inject memory into system prompt (not user message) so it
-    // doesn't pollute session history and is re-fetched each turn.
-    let base_system_prompt = if had_prior_history {
-        ctx.system_prompt.as_str().to_string()
+    // Build system prompt fresh for each message — no post-build mutation.
+    // New sessions reload skills from disk; existing sessions reuse cached skills.
+    let reply_target_ref = if msg.reply_target.is_empty() {
+        None
     } else {
-        refreshed_new_session_system_prompt(ctx.as_ref())
+        Some(msg.reply_target.as_str())
     };
-    let mut system_prompt = base_system_prompt;
-
-    // Strip stale model guidance and re-inject for the routed model
-    {
-        const GUIDANCE_HEADER: &str = "## Model Specific Guidance\n\n";
-        if let Some(start) = system_prompt.find(GUIDANCE_HEADER) {
-            let header_len = GUIDANCE_HEADER.len();
-            let rest = &system_prompt[start + header_len..];
-            let section_end = rest
-                .find("\n## ")
-                .map(|i| start + header_len + i)
-                .unwrap_or(system_prompt.len());
-            system_prompt.replace_range(start..section_end, "");
-        }
-        if route.model.to_lowercase().contains("grok") {
-            system_prompt.push_str(crate::agent::prompt::GROK_GUIDANCE);
-            system_prompt.push('\n');
-        }
-    }
-
-    // Append channel delivery instructions and context via the centralized section
-    {
-        let tools: Vec<Box<dyn Tool>> = vec![];
-        let delivery_ctx = crate::agent::prompt::PromptContext {
-            workspace_dir: ctx.workspace_dir.as_ref(),
-            model_name: &route.model,
-            tools: &tools,
-            skills: &[],
-            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
-            identity_config: None,
-            dispatcher_instructions: "",
-            tool_descriptions: None,
-            security_summary: None,
-            autonomy_level: ctx.autonomy_level,
-            native_tools: false,
-            compact_context: false,
-            max_system_prompt_chars: 0,
-            channel_name: Some(&msg.channel),
-            reply_target: if msg.reply_target.is_empty() {
-                None
-            } else {
-                Some(&msg.reply_target)
-            },
-        };
-        let delivery = crate::agent::prompt::ChannelDeliverySection
-            .build(&delivery_ctx)
-            .unwrap_or_default();
-        if !delivery.is_empty() {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(&delivery);
-        }
-    }
+    let mut system_prompt = if had_prior_history {
+        ctx.build_system_prompt(&route.model, &msg.channel, reply_target_ref, &ctx.skills)
+    } else {
+        refreshed_new_session_system_prompt(
+            ctx.as_ref(),
+            &route.model,
+            &msg.channel,
+            reply_target_ref,
+        )
+    };
     if !memory_context.is_empty() {
         let _ = write!(system_prompt, "\n\n{memory_context}");
     }
@@ -4121,37 +4069,6 @@ pub async fn start_channels(config: Config) -> Result<()> {
     let i18n_descs = crate::i18n::ToolDescriptions::load(&i18n_locale, &i18n_search_dirs);
 
     let native_tools = provider.supports_native_tools();
-    let prompt_ctx = crate::agent::prompt::PromptContext {
-        workspace_dir: &workspace,
-        model_name: &model,
-        tools: tools_registry.as_ref(),
-        skills: &skills,
-        skills_prompt_mode: config.skills.prompt_injection_mode,
-        identity_config: Some(&config.identity),
-        dispatcher_instructions: "",
-        tool_descriptions: Some(&i18n_descs),
-        security_summary: None,
-        autonomy_level: config.autonomy.level,
-        native_tools,
-        compact_context: config.agent.compact_context,
-        max_system_prompt_chars: config.agent.max_system_prompt_chars,
-        channel_name: None,
-        reply_target: None,
-    };
-    let mut system_prompt =
-        crate::agent::prompt::build_system_prompt(&prompt_ctx).unwrap_or_default();
-    if !native_tools {
-        system_prompt.push_str(&build_tool_instructions(
-            tools_registry.as_ref(),
-            Some(&i18n_descs),
-        ));
-    }
-
-    // Append deferred MCP tool names so the LLM knows what is available
-    if !deferred_section.is_empty() {
-        system_prompt.push('\n');
-        system_prompt.push_str(&deferred_section);
-    }
 
     if !skills.is_empty() {
         println!(
@@ -4282,7 +4199,9 @@ pub async fn start_channels(config: Config) -> Result<()> {
         memory: Arc::clone(&mem),
         tools_registry: Arc::clone(&tools_registry),
         observer,
-        system_prompt: Arc::new(system_prompt),
+        native_tools,
+        deferred_tools_text: Arc::new(deferred_section),
+        i18n_descs: Arc::new(i18n_descs),
         model: Arc::new(model.clone()),
         temperature,
         auto_save_memory: config.memory.auto_save,
@@ -4442,25 +4361,23 @@ mod tests {
         tmp
     }
 
+    fn make_prompt_with_identity(
+        workspace_dir: &std::path::Path,
+        identity_config: &crate::config::IdentityConfig,
+    ) -> String {
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let mut ctx = crate::agent::prompt::test_helpers::make_test_ctx(&tools);
+        ctx.workspace_dir = workspace_dir;
+        ctx.model_name = "model";
+        ctx.identity_config = Some(identity_config);
+        crate::agent::prompt::build_system_prompt(&ctx).unwrap()
+    }
+
     fn make_prompt(workspace_dir: &std::path::Path, model_name: &str) -> String {
         let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
-        let ctx = crate::agent::prompt::PromptContext {
-            workspace_dir,
-            model_name,
-            tools: &tools,
-            skills: &[],
-            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
-            identity_config: None,
-            dispatcher_instructions: "",
-            tool_descriptions: None,
-            security_summary: None,
-            autonomy_level: AutonomyLevel::default(),
-            native_tools: false,
-            compact_context: false,
-            max_system_prompt_chars: 0,
-            channel_name: None,
-            reply_target: None,
-        };
+        let mut ctx = crate::agent::prompt::test_helpers::make_test_ctx(&tools);
+        ctx.workspace_dir = workspace_dir;
+        ctx.model_name = model_name;
         crate::agent::prompt::build_system_prompt(&ctx).unwrap()
     }
 
@@ -4745,7 +4662,9 @@ mod tests {
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("system".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -4866,7 +4785,9 @@ mod tests {
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("system".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -4943,7 +4864,9 @@ mod tests {
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("system".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -5039,7 +4962,9 @@ mod tests {
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("system".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -5618,7 +5543,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -5705,7 +5632,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -5806,7 +5735,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -5892,7 +5823,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -5988,7 +5921,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -6105,7 +6040,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -6203,7 +6140,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -6314,7 +6253,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("startup-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -6415,7 +6356,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -6506,7 +6449,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -6723,7 +6668,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -6832,7 +6779,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -6960,7 +6909,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7085,7 +7036,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7188,7 +7141,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7274,7 +7229,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7717,7 +7674,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7826,23 +7785,11 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(initial_skills.is_empty());
 
         let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
-        let prompt_ctx = crate::agent::prompt::PromptContext {
-            workspace_dir: workspace.path(),
-            model_name: "test-model",
-            tools: &tools,
-            skills: &initial_skills,
-            skills_prompt_mode: config.skills.prompt_injection_mode,
-            identity_config: Some(&config.identity),
-            dispatcher_instructions: "",
-            tool_descriptions: None,
-            security_summary: None,
-            autonomy_level: AutonomyLevel::default(),
-            native_tools: false,
-            compact_context: false,
-            max_system_prompt_chars: 0,
-            channel_name: None,
-            reply_target: None,
-        };
+        let mut prompt_ctx = crate::agent::prompt::test_helpers::make_test_ctx(&tools);
+        prompt_ctx.workspace_dir = workspace.path();
+        prompt_ctx.skills = &initial_skills;
+        prompt_ctx.skills_prompt_mode = config.skills.prompt_injection_mode;
+        prompt_ctx.identity_config = Some(&config.identity);
         let initial_system_prompt = crate::agent::prompt::build_system_prompt(&prompt_ctx).unwrap();
         assert!(
             !initial_system_prompt.contains("refresh-test"),
@@ -7863,7 +7810,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new(initial_system_prompt),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -7937,8 +7886,13 @@ BTC is currently around $65,000 based on latest tool output."#
         assert_eq!(refreshed_skills.len(), 1);
         assert_eq!(refreshed_skills[0].name, "refresh-test");
         assert!(
-            refreshed_new_session_system_prompt(runtime_ctx.as_ref())
-                .contains("<name>refresh-test</name>"),
+            refreshed_new_session_system_prompt(
+                runtime_ctx.as_ref(),
+                "test-model",
+                "telegram",
+                None,
+            )
+            .contains("<name>refresh-test</name>"),
             "fresh-session prompt should pick up skills added after startup"
         );
 
@@ -8044,7 +7998,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(RecallMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -8164,7 +8120,9 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -8378,25 +8336,7 @@ This is an example JSON object for profile settings."#;
             aieos_inline: None,
         };
 
-        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
-        let ctx = crate::agent::prompt::PromptContext {
-            workspace_dir: tmp.path(),
-            model_name: "model",
-            tools: &tools,
-            skills: &[],
-            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
-            identity_config: Some(&config),
-            dispatcher_instructions: "",
-            tool_descriptions: None,
-            security_summary: None,
-            autonomy_level: AutonomyLevel::default(),
-            native_tools: false,
-            compact_context: false,
-            max_system_prompt_chars: 0,
-            channel_name: None,
-            reply_target: None,
-        };
-        let prompt = crate::agent::prompt::build_system_prompt(&ctx).unwrap();
+        let prompt = make_prompt_with_identity(tmp.path(), &config);
 
         // Should contain AIEOS sections
         assert!(prompt.contains("## Identity"));
@@ -8429,26 +8369,7 @@ This is an example JSON object for profile settings."#;
             aieos_inline: Some(r#"{"identity":{"names":{"first":"Claw"}}}"#.into()),
         };
 
-        let tmp_dir = std::env::temp_dir();
-        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
-        let ctx = crate::agent::prompt::PromptContext {
-            workspace_dir: tmp_dir.as_path(),
-            model_name: "model",
-            tools: &tools,
-            skills: &[],
-            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
-            identity_config: Some(&config),
-            dispatcher_instructions: "",
-            tool_descriptions: None,
-            security_summary: None,
-            autonomy_level: AutonomyLevel::default(),
-            native_tools: false,
-            compact_context: false,
-            max_system_prompt_chars: 0,
-            channel_name: None,
-            reply_target: None,
-        };
-        let prompt = crate::agent::prompt::build_system_prompt(&ctx).unwrap();
+        let prompt = make_prompt_with_identity(std::env::temp_dir().as_path(), &config);
 
         assert!(prompt.contains("**Name:** Claw"));
         assert!(prompt.contains("## Identity"));
@@ -8465,25 +8386,7 @@ This is an example JSON object for profile settings."#;
         };
 
         let ws = make_workspace();
-        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
-        let ctx = crate::agent::prompt::PromptContext {
-            workspace_dir: ws.path(),
-            model_name: "model",
-            tools: &tools,
-            skills: &[],
-            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
-            identity_config: Some(&config),
-            dispatcher_instructions: "",
-            tool_descriptions: None,
-            security_summary: None,
-            autonomy_level: AutonomyLevel::default(),
-            native_tools: false,
-            compact_context: false,
-            max_system_prompt_chars: 0,
-            channel_name: None,
-            reply_target: None,
-        };
-        let prompt = crate::agent::prompt::build_system_prompt(&ctx).unwrap();
+        let prompt = make_prompt_with_identity(ws.path(), &config);
 
         // Should fall back to OpenClaw personality files when AIEOS file is not found
         assert!(prompt.contains("### SOUL.md"));
@@ -8501,25 +8404,7 @@ This is an example JSON object for profile settings."#;
         };
 
         let ws = make_workspace();
-        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
-        let ctx = crate::agent::prompt::PromptContext {
-            workspace_dir: ws.path(),
-            model_name: "model",
-            tools: &tools,
-            skills: &[],
-            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
-            identity_config: Some(&config),
-            dispatcher_instructions: "",
-            tool_descriptions: None,
-            security_summary: None,
-            autonomy_level: AutonomyLevel::default(),
-            native_tools: false,
-            compact_context: false,
-            max_system_prompt_chars: 0,
-            channel_name: None,
-            reply_target: None,
-        };
-        let prompt = crate::agent::prompt::build_system_prompt(&ctx).unwrap();
+        let prompt = make_prompt_with_identity(ws.path(), &config);
 
         // Should use OpenClaw format (not configured for AIEOS)
         assert!(prompt.contains("### SOUL.md"));
@@ -8537,25 +8422,7 @@ This is an example JSON object for profile settings."#;
         };
 
         let ws = make_workspace();
-        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
-        let ctx = crate::agent::prompt::PromptContext {
-            workspace_dir: ws.path(),
-            model_name: "model",
-            tools: &tools,
-            skills: &[],
-            skills_prompt_mode: crate::config::SkillsPromptInjectionMode::Full,
-            identity_config: Some(&config),
-            dispatcher_instructions: "",
-            tool_descriptions: None,
-            security_summary: None,
-            autonomy_level: AutonomyLevel::default(),
-            native_tools: false,
-            compact_context: false,
-            max_system_prompt_chars: 0,
-            channel_name: None,
-            reply_target: None,
-        };
-        let prompt = crate::agent::prompt::build_system_prompt(&ctx).unwrap();
+        let prompt = make_prompt_with_identity(ws.path(), &config);
 
         // Should use OpenClaw format even if aieos_path is set
         assert!(prompt.contains("### SOUL.md"));
@@ -8801,7 +8668,9 @@ This is an example JSON object for profile settings."#;
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("You are a helpful assistant.".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -8894,7 +8763,9 @@ This is an example JSON object for profile settings."#;
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("You are a helpful assistant.".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -9025,7 +8896,9 @@ This is an example JSON object for profile settings."#;
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("You are a helpful assistant.".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -9200,7 +9073,9 @@ This is an example JSON object for profile settings."#;
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -9317,7 +9192,9 @@ This is an example JSON object for profile settings."#;
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -9426,7 +9303,9 @@ This is an example JSON object for profile settings."#;
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -9555,7 +9434,9 @@ This is an example JSON object for profile settings."#;
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("default-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
@@ -9777,7 +9658,9 @@ This is an example JSON object for profile settings."#;
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new("test-system-prompt".to_string()),
+            native_tools: false,
+            deferred_tools_text: Arc::new(String::new()),
+            i18n_descs: Arc::new(crate::i18n::ToolDescriptions::empty()),
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,

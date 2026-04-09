@@ -1033,10 +1033,12 @@ impl DelegateTool {
             max_system_prompt_chars: 0,
             channel_name: None,
             reply_target: None,
+            deferred_tools_text: "",
         };
 
         let builder = SystemPromptBuilder::default()
             .add_section(Box::new(crate::agent::prompt::ToolsSection))
+            .add_section(Box::new(crate::agent::prompt::ToolUseProtocolSection))
             .add_section(Box::new(crate::agent::prompt::SafetySection))
             .add_section(Box::new(crate::agent::prompt::SkillsSection))
             .add_section(Box::new(crate::agent::prompt::WorkspaceSection));
@@ -2039,7 +2041,10 @@ mod tests {
             .build_enriched_system_prompt(&config, &tools, &workspace)
             .unwrap();
 
-        assert!(prompt.contains("## Tools"), "should contain tools section");
+        assert!(
+            prompt.contains("## Tool Use Protocol"),
+            "should contain tool use protocol section"
+        );
         assert!(prompt.contains("echo_tool"), "should list allowed tools");
         assert!(
             prompt.contains("## Workspace"),
