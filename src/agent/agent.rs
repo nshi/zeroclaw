@@ -612,6 +612,12 @@ impl Agent {
             tool_descriptions: self.tool_descriptions.as_ref(),
             security_summary: self.security_summary.clone(),
             autonomy_level: self.autonomy_level,
+            native_tools: false,
+            compact_context: false,
+            max_system_prompt_chars: 0,
+            channel_name: None,
+            reply_target: None,
+            deferred_tools_text: "",
         };
         self.prompt_builder.build(&ctx)
     }

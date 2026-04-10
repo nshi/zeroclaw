@@ -1,7 +1,6 @@
 use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
 use crate::config::Config;
 use crate::cost::types::BudgetCheck;
-use crate::i18n::ToolDescriptions;
 use crate::memory::{self, Memory, MemoryCategory, decay};
 use crate::multimodal;
 use crate::observability::{self, Observer, ObserverEvent, runtime_trace};
@@ -3451,39 +3450,6 @@ pub(crate) async fn run_tool_call_loop(
     }
 }
 
-/// Build the tool instruction block for the system prompt so the LLM knows
-/// how to invoke tools.
-pub(crate) fn build_tool_instructions(
-    tools_registry: &[Box<dyn Tool>],
-    tool_descriptions: Option<&ToolDescriptions>,
-) -> String {
-    let mut instructions = String::new();
-    instructions.push_str("\n## Tool Use Protocol\n\n");
-    instructions.push_str("Wrap a JSON object in <tool_call></tool_call> tags:\n\n");
-    instructions.push_str("```\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n</tool_call>\n```\n\n");
-    instructions.push_str("CRITICAL: Output actual <tool_call> tags — never describe steps.\n");
-    instructions.push_str(crate::agent::prompt::TOOL_CALL_INSTRUCTIONS);
-    instructions.push_str("\n\n");
-    instructions.push_str("Example: User says \"what's the date?\" → respond:\n<tool_call>\n{\"name\":\"shell\",\"arguments\":{\"command\":\"date\"}}\n</tool_call>\n\n");
-    instructions.push_str("Multiple tool calls per response allowed. Results appear in <tool_result> tags. Continue reasoning until you can give a final answer.\n\n");
-    instructions.push_str("### Available Tools\n\n");
-
-    for tool in tools_registry {
-        let desc = tool_descriptions
-            .and_then(|td| td.get(tool.name()))
-            .unwrap_or_else(|| tool.description());
-        let _ = writeln!(
-            instructions,
-            "**{}**: {}\nParameters: `{}`\n",
-            tool.name(),
-            desc,
-            tool.parameters_schema()
-        );
-    }
-
-    instructions
-}
-
 // ── CLI Entrypoint ───────────────────────────────────────────────────────
 // Wires up all subsystems (observer, runtime, security, memory, tools,
 // provider, hardware RAG, peripherals) and enters either single-shot or
@@ -3743,144 +3709,27 @@ pub async fn run(
     // so the LLM can invoke them via native function calling, not just XML prompts.
     tools::register_skill_tools(&mut tools_registry, &skills, security.clone());
 
-    let mut tool_descs: Vec<(&str, &str)> = vec![
-        (
-            "shell",
-            "Execute terminal commands. Use when: running local checks, build/test commands, diagnostics. Don't use when: a safer dedicated tool exists, or command is destructive without approval.",
-        ),
-        (
-            "file_read",
-            "Read file contents. Use when: inspecting project files, configs, logs. Don't use when: a targeted search is enough.",
-        ),
-        (
-            "file_write",
-            "Write file contents. Use when: applying focused edits, scaffolding files, updating docs/code. Don't use when: side effects are unclear or file ownership is uncertain.",
-        ),
-        (
-            "memory_store",
-            "Save to memory. Use when: preserving durable preferences, decisions, key context. Don't use when: information is transient/noisy/sensitive without need.",
-        ),
-        (
-            "memory_recall",
-            "Search memory. Use when: retrieving prior decisions, user preferences, historical context. Don't use when: answer is already in current context.",
-        ),
-        (
-            "memory_forget",
-            "Delete a memory entry. Use when: memory is incorrect/stale or explicitly requested for removal. Don't use when: impact is uncertain.",
-        ),
-    ];
-    tool_descs.push((
-        "tool_search",
-        "Discover available tools by keyword. Use when: you need a capability but aren't sure which tool provides it, or you want to inspect a tool's parameters. Searches all registered tools.",
-    ));
-    tool_descs.push((
-        "use_skill",
-        "Invoke a skill by name. BLOCKING REQUIREMENT: when the user's request matches a skill description in <available_skills> or the user mentions a skill by name, invoke use_skill BEFORE generating any other response. Don't use when: no available skill matches the user's intent.",
-    ));
-    tool_descs.push((
-        "cron_add",
-        "Create a cron job. Supports schedule kinds: cron, at, every; and job types: shell or agent.",
-    ));
-    tool_descs.push((
-        "cron_list",
-        "List all cron jobs with schedule, status, and metadata.",
-    ));
-    tool_descs.push(("cron_remove", "Remove a cron job by job_id."));
-    tool_descs.push((
-        "cron_update",
-        "Patch a cron job (schedule, enabled, command/prompt, model, delivery, session_target).",
-    ));
-    tool_descs.push((
-        "cron_run",
-        "Force-run a cron job immediately and record a run history entry.",
-    ));
-    tool_descs.push(("cron_runs", "Show recent run history for a cron job."));
-    if config.browser.enabled {
-        tool_descs.push((
-            "browser_open",
-            "Open approved HTTPS URLs in system browser (allowlist-only, no scraping)",
-        ));
-    }
-    if config.composio.enabled {
-        tool_descs.push((
-            "composio",
-            "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). Use action='list' to discover, 'execute' to run (optionally with connected_account_id), 'connect' to OAuth.",
-        ));
-    }
-    tool_descs.push((
-        "schedule",
-        "Manage scheduled tasks (create/list/get/cancel/pause/resume). Supports recurring cron and one-shot delays.",
-    ));
-    tool_descs.push((
-        "model_routing_config",
-        "Configure default model, scenario routing, and delegate agents. Use for natural-language requests like: 'set conversation to kimi and coding to gpt-5.3-codex'.",
-    ));
-    if !config.agents.is_empty() {
-        tool_descs.push((
-            "delegate",
-            "Delegate a sub-task to a specialized agent. Use when: task needs different model/capability, or to parallelize work.",
-        ));
-    }
-    if config.peripherals.enabled && !config.peripherals.boards.is_empty() {
-        tool_descs.push((
-            "gpio_read",
-            "Read GPIO pin value (0 or 1) on connected hardware (STM32, Arduino). Use when: checking sensor/button state, LED status.",
-        ));
-        tool_descs.push((
-            "gpio_write",
-            "Set GPIO pin high (1) or low (0) on connected hardware. Use when: turning LED on/off, controlling actuators.",
-        ));
-        tool_descs.push((
-            "arduino_upload",
-            "Upload agent-generated Arduino sketch. Use when: user asks for 'make a heart', 'blink pattern', or custom LED behavior on Arduino. You write the full .ino code; ZeroClaw compiles and uploads it. Pin 13 = built-in LED on Uno.",
-        ));
-        tool_descs.push((
-            "hardware_memory_map",
-            "Return flash and RAM address ranges for connected hardware. Use when: user asks for 'upper and lower memory addresses', 'memory map', or 'readable addresses'.",
-        ));
-        tool_descs.push((
-            "hardware_board_info",
-            "Return full board info (chip, architecture, memory map) for connected hardware. Use when: user asks for 'board info', 'what board do I have', 'connected hardware', 'chip info', or 'what hardware'.",
-        ));
-        tool_descs.push((
-            "hardware_memory_read",
-            "Read actual memory/register values from Nucleo via USB. Use when: user asks to 'read register values', 'read memory', 'dump lower memory 0-126', 'give address and value'. Params: address (hex, default 0x20000000), length (bytes, default 128).",
-        ));
-        tool_descs.push((
-            "hardware_capabilities",
-            "Query connected hardware for reported GPIO pins and LED pin. Use when: user asks what pins are available.",
-        ));
-    }
-    let bootstrap_max_chars = if config.agent.compact_context {
-        Some(6000)
-    } else {
-        None
-    };
     let native_tools = provider.supports_native_tools();
-    let mut system_prompt = crate::channels::build_system_prompt_with_mode_and_autonomy(
-        &config.workspace_dir,
-        &model_name,
-        &tool_descs,
-        &skills,
-        Some(&config.identity),
-        bootstrap_max_chars,
-        Some(&config.autonomy),
+    let prompt_ctx = crate::agent::prompt::PromptContext {
+        workspace_dir: &config.workspace_dir,
+        model_name: &model_name,
+        tools: &tools_registry,
+        skills: &skills,
+        skills_prompt_mode: config.skills.prompt_injection_mode,
+        identity_config: Some(&config.identity),
+        dispatcher_instructions: "",
+        tool_descriptions: Some(&i18n_descs),
+        security_summary: None,
+        autonomy_level: config.autonomy.level,
         native_tools,
-        config.skills.prompt_injection_mode,
-        config.agent.compact_context,
-        config.agent.max_system_prompt_chars,
-    );
-
-    // Append structured tool-use instructions with schemas (only for non-native providers)
-    if !native_tools {
-        system_prompt.push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
-    }
-
-    // Append deferred MCP tool names so the LLM knows what is available
-    if !deferred_section.is_empty() {
-        system_prompt.push('\n');
-        system_prompt.push_str(&deferred_section);
-    }
+        compact_context: config.agent.compact_context,
+        max_system_prompt_chars: config.agent.max_system_prompt_chars,
+        channel_name: None,
+        reply_target: None,
+        deferred_tools_text: &deferred_section,
+    };
+    let mut system_prompt =
+        crate::agent::prompt::build_system_prompt(&prompt_ctx).unwrap_or_default();
 
     // ── Approval manager (supervised mode) ───────────────────────
     let approval_manager = if interactive {
@@ -4640,89 +4489,27 @@ pub async fn process_message(
     // Register skill-defined tools as callable tool specs (process_message path).
     tools::register_skill_tools(&mut tools_registry, &skills, security.clone());
 
-    let mut tool_descs: Vec<(&str, &str)> = vec![
-        ("shell", "Execute terminal commands."),
-        ("file_read", "Read file contents."),
-        ("file_write", "Write file contents."),
-        ("memory_store", "Save to memory."),
-        ("memory_recall", "Search memory."),
-        ("memory_forget", "Delete a memory entry."),
-        (
-            "model_routing_config",
-            "Configure default model, scenario routing, and delegate agents.",
-        ),
-    ];
-    tool_descs.push(("tool_search", "Discover available tools by keyword."));
-    tool_descs.push(("use_skill", "Invoke a skill by name."));
-    if config.browser.enabled {
-        tool_descs.push(("browser_open", "Open approved URLs in browser."));
-    }
-    if config.composio.enabled {
-        tool_descs.push(("composio", "Execute actions on 1000+ apps via Composio."));
-    }
-    if config.peripherals.enabled && !config.peripherals.boards.is_empty() {
-        tool_descs.push(("gpio_read", "Read GPIO pin value on connected hardware."));
-        tool_descs.push((
-            "gpio_write",
-            "Set GPIO pin high or low on connected hardware.",
-        ));
-        tool_descs.push((
-            "arduino_upload",
-            "Upload Arduino sketch. Use for 'make a heart', custom patterns. You write full .ino code; ZeroClaw uploads it.",
-        ));
-        tool_descs.push((
-            "hardware_memory_map",
-            "Return flash and RAM address ranges. Use when user asks for memory addresses or memory map.",
-        ));
-        tool_descs.push((
-            "hardware_board_info",
-            "Return full board info (chip, architecture, memory map). Use when user asks for board info, what board, connected hardware, or chip info.",
-        ));
-        tool_descs.push((
-            "hardware_memory_read",
-            "Read actual memory/register values from Nucleo. Use when user asks to read registers, read memory, dump lower memory 0-126, or give address and value.",
-        ));
-        tool_descs.push((
-            "hardware_capabilities",
-            "Query connected hardware for reported GPIO pins and LED pin. Use when user asks what pins are available.",
-        ));
-    }
-
-    // Filter out tools excluded for non-CLI channels (gateway counts as non-CLI).
-    // Skip when autonomy is `Full` — full-autonomy agents keep all tools.
-    if config.autonomy.level != AutonomyLevel::Full {
-        let excluded = &config.autonomy.non_cli_excluded_tools;
-        if !excluded.is_empty() {
-            tool_descs.retain(|(name, _)| !excluded.iter().any(|ex| ex == name));
-        }
-    }
-
-    let bootstrap_max_chars = if config.agent.compact_context {
-        Some(6000)
-    } else {
-        None
-    };
     let native_tools = provider.supports_native_tools();
-    let mut system_prompt = crate::channels::build_system_prompt_with_mode_and_autonomy(
-        &config.workspace_dir,
-        &model_name,
-        &tool_descs,
-        &skills,
-        Some(&config.identity),
-        bootstrap_max_chars,
-        Some(&config.autonomy),
+    let prompt_ctx = crate::agent::prompt::PromptContext {
+        workspace_dir: &config.workspace_dir,
+        model_name: &model_name,
+        tools: &tools_registry,
+        skills: &skills,
+        skills_prompt_mode: config.skills.prompt_injection_mode,
+        identity_config: Some(&config.identity),
+        dispatcher_instructions: "",
+        tool_descriptions: Some(&i18n_descs),
+        security_summary: None,
+        autonomy_level: config.autonomy.level,
         native_tools,
-        config.skills.prompt_injection_mode,
-        config.agent.compact_context,
-        config.agent.max_system_prompt_chars,
-    );
-    if !native_tools {
-        system_prompt.push_str(&build_tool_instructions(&tools_registry, Some(&i18n_descs)));
-    }
-    if !deferred_section.is_empty() {
-        system_prompt.push('\n');
-        system_prompt.push_str(&deferred_section);
-    }
+        compact_context: config.agent.compact_context,
+        max_system_prompt_chars: config.agent.max_system_prompt_chars,
+        channel_name: None,
+        reply_target: None,
+        deferred_tools_text: &deferred_section,
+    };
+    let mut system_prompt =
+        crate::agent::prompt::build_system_prompt(&prompt_ctx).unwrap_or_default();
 
     // ── Parse thinking directive from user message ─────────────
     let (thinking_directive, effective_message) =
@@ -7960,23 +7747,6 @@ Tail"#;
     }
 
     #[test]
-    fn build_tool_instructions_includes_all_tools() {
-        use crate::security::SecurityPolicy;
-        let security = Arc::new(SecurityPolicy::from_config(
-            &crate::config::AutonomyConfig::default(),
-            std::path::Path::new("/tmp"),
-        ));
-        let tools = tools::default_tools(security);
-        let instructions = build_tool_instructions(&tools, None);
-
-        assert!(instructions.contains("## Tool Use Protocol"));
-        assert!(instructions.contains("<tool_call>"));
-        assert!(instructions.contains("shell"));
-        assert!(instructions.contains("file_read"));
-        assert!(instructions.contains("file_write"));
-    }
-
-    #[test]
     fn tools_to_openai_format_produces_valid_schema() {
         use crate::security::SecurityPolicy;
         let security = Arc::new(SecurityPolicy::from_config(
@@ -8778,37 +8548,22 @@ Let me check the result."#;
         assert_eq!(history[1].content, "new msg");
     }
 
-    /// When `build_system_prompt_with_mode` is called with `native_tools = true`,
-    /// the output must contain ZERO XML protocol artifacts. In the native path
-    /// `build_tool_instructions` is never called, so the system prompt alone
-    /// must be clean of XML tool-call protocol.
+    /// When SystemPromptBuilder is called with `native_tools = true`,
+    /// the output must contain ZERO XML protocol artifacts.
     #[test]
     fn native_tools_system_prompt_contains_zero_xml() {
-        use crate::channels::build_system_prompt_with_mode;
+        use crate::agent::prompt::{build_system_prompt, test_helpers::make_named_tool};
 
-        let tool_summaries: Vec<(&str, &str)> = vec![
-            ("shell", "Execute shell commands"),
-            ("file_read", "Read files"),
-        ];
+        let tools: Vec<Box<dyn crate::tools::Tool>> =
+            vec![make_named_tool("shell"), make_named_tool("file_read")];
+        let mut ctx = crate::agent::prompt::test_helpers::make_test_ctx(&tools);
+        ctx.native_tools = true;
+        let system_prompt = build_system_prompt(&ctx).unwrap();
 
-        let system_prompt = build_system_prompt_with_mode(
-            std::path::Path::new("/tmp"),
-            "test-model",
-            &tool_summaries,
-            &[],  // no skills
-            None, // no identity config
-            None, // no bootstrap_max_chars
-            true, // native_tools
-            crate::config::SkillsPromptInjectionMode::Full,
-            crate::security::AutonomyLevel::default(),
-        );
-
-        // Must not contain the full XML tool-use protocol section header
         assert!(
             !system_prompt.contains("## Tool Use Protocol"),
             "Native prompt must not contain XML protocol header"
         );
-        // Must not contain XML result tags (call tags may appear in efficiency hints)
         assert!(
             !system_prompt.contains("<tool_result>"),
             "Native prompt must not contain <tool_result>"
@@ -8817,8 +8572,6 @@ Let me check the result."#;
             !system_prompt.contains("</tool_result>"),
             "Native prompt must not contain </tool_result>"
         );
-
-        // Positive: native prompt should still list tools and contain task instructions
         assert!(
             system_prompt.contains("shell"),
             "Native prompt must list tool names"
