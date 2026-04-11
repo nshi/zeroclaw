@@ -21,6 +21,8 @@ _No custom slash commands defined yet._
 - Rust (edition 2024, stable toolchain) + tokio, serde, reqwest, teloxide (Telegram), slack-morphism (Slack), axum (gateway) (002-fix-tests-fast-builds)
 - Rust (edition 2024, stable toolchain) + tokio, serde, teloxide (Telegram), slack-morphism (Slack), axum (gateway) (003-centralize-system-prompt)
 - N/A (no persistence changes) (003-centralize-system-prompt)
+- Python 3.11+ (run via `uv`) + Standard library only (`json`, `argparse`, `os`, `sys`, `re`). No external packages needed — the JSONL format is native to Python's `json` module, and ANSI colors use escape sequences directly. (004-trace-log-viewer)
+- Reads `state/runtime-trace.jsonl` (JSONL format, one `RuntimeTraceEvent` per line) (004-trace-log-viewer)
 
 ## Recent Changes
 - 001-simplify-channels-providers: Added Rust (edition 2021, stable toolchain) + tokio, serde, reqwest, teloxide (Telegram), slack-morphism (Slack)
