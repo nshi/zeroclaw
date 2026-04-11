@@ -902,9 +902,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                                 tower::Service::call(&mut svc, req).await
                             }
                         });
-                        if let Err(e) = hyper_util::server::conn::auto::Builder::new(
-                            hyper_util::rt::TokioExecutor::new(),
-                        )
+                        if let Err(e) = hyper::server::conn::http1::Builder::new()
                         .serve_connection(io, hyper_svc)
                         .await
                         {

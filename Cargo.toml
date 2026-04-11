@@ -67,7 +67,7 @@ prometheus = { version = "0.14", default-features = false, optional = true }
 
 # Base64 encoding (screenshots, image data)
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
 
 # URL encoding for web search
 urlencoding = "2.1"
@@ -143,16 +143,16 @@ tokio-socks = "0.5"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 regex = "1.10"
 hostname = "0.4.2"
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "tls12", "std"] }
 rustls-pemfile = "2"
 rustls-pki-types = "1.14.0"
-tokio-rustls = "0.26.4"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
 webpki-roots = "1.0.6"
 
 # HTTP server (gateway) — replaces raw TCP for proper HTTP/1.1 compliance
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws", "macros"] }
 hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "server", "server-graceful", "http1"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-http = { version = "0.6", default-features = false, features = ["limit", "timeout"] }
 http-body-util = "0.1"
