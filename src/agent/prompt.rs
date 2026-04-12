@@ -129,6 +129,82 @@ pub fn build_skill_hint(skills: &[crate::skills::Skill], user_message: &str) -> 
     hint
 }
 
+/// Pre-emptive tool hint: search the tool registry for tools whose name or
+/// description matches keywords in the user message, and return a short hint
+/// so the LLM is aware of relevant tools it might otherwise overlook.
+///
+/// Unlike `tool_search` (which activates deferred tools), this performs a
+/// read-only keyword search against tool specs already in the registry.
+/// The LLM decides whether to actually use the tool — the hint is advisory.
+///
+/// Returns an empty string when no tools match or the message is empty.
+pub fn build_tool_hint(tool_specs: &[crate::tools::ToolSpec], user_message: &str) -> String {
+    use std::fmt::Write;
+
+    if tool_specs.is_empty() || user_message.is_empty() {
+        return String::new();
+    }
+
+    // Filter out short words and common stop words to reduce false positives.
+    const STOP_WORDS: &[&str] = &[
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was", "one",
+        "our", "out", "has", "its", "let", "may", "who", "did", "get", "got", "him", "his", "how",
+        "its", "may", "new", "now", "old", "see", "way", "use", "set", "run", "any", "few", "too",
+        "yet", "also", "been", "call", "each", "from", "have", "into", "just", "like", "make",
+        "many", "more", "most", "must", "need", "only", "over", "such", "take", "than", "that",
+        "them", "then", "they", "this", "very", "want", "well", "what", "when", "will", "with",
+        "your", "does", "done", "some", "were",
+    ];
+    let terms: Vec<String> = user_message
+        .split_whitespace()
+        .map(|t| {
+            t.to_ascii_lowercase()
+                .trim_end_matches(|c: char| c.is_ascii_punctuation())
+                .to_string()
+        })
+        .filter(|t| t.len() >= 3 && !STOP_WORDS.contains(&t.as_str()))
+        .collect();
+
+    if terms.is_empty() {
+        return String::new();
+    }
+
+    let mut scored: Vec<(&str, &str, usize)> = tool_specs
+        .iter()
+        .filter_map(|spec| {
+            let haystack = format!(
+                "{} {}",
+                spec.name.to_ascii_lowercase(),
+                spec.description.to_ascii_lowercase()
+            );
+            let hits = terms
+                .iter()
+                .filter(|t| haystack.contains(t.as_str()))
+                .count();
+            if hits >= 2 {
+                Some((spec.name.as_str(), spec.description.as_str(), hits))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if scored.is_empty() {
+        return String::new();
+    }
+
+    scored.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(b.0)));
+    scored.truncate(3);
+
+    let mut hint = String::from("[Tool hint: potentially relevant tools for this request:\n");
+    for (name, desc, _) in &scored {
+        let short_desc = desc.find(". ").map_or(*desc, |i| &desc[..=i]);
+        let _ = writeln!(hint, "- {name}: {short_desc}");
+    }
+    hint.push_str("These tools are already available — call them directly if relevant.]\n");
+    hint
+}
+
 /// Prefix a user message with the current local timestamp so the LLM has an
 /// accurate sense of "now" on every turn (system prompt stays stable for caching).
 pub fn timestamp_prefix(message: &str, context: Option<&str>) -> String {
@@ -1307,6 +1383,70 @@ mod tests {
     fn skill_hint_slash_no_cross_match() {
         let skills = vec![make_skill("commit", vec![])];
         let hint = build_skill_hint(&skills, "/deploy now");
+        assert!(hint.is_empty());
+    }
+
+    // ── Tool hint tests ────────────────────────────────────────────
+
+    fn make_tool_spec(name: &str, description: &str) -> crate::tools::ToolSpec {
+        crate::tools::ToolSpec {
+            name: name.into(),
+            description: description.into(),
+            parameters: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn tool_hint_empty_when_no_tools() {
+        assert_eq!(build_tool_hint(&[], "ask user for confirmation"), "");
+    }
+
+    #[test]
+    fn tool_hint_empty_when_no_match() {
+        let specs = vec![make_tool_spec("shell", "Run shell commands")];
+        assert_eq!(build_tool_hint(&specs, "what is the weather today"), "");
+    }
+
+    #[test]
+    fn tool_hint_matches_on_two_keyword_hits() {
+        let specs = vec![make_tool_spec(
+            "ask_user",
+            "Ask the user a question and wait for their response",
+        )];
+        let hint = build_tool_hint(&specs, "ask the user which environment to deploy");
+        assert!(hint.contains("ask_user"));
+        assert!(hint.contains("Tool hint"));
+    }
+
+    #[test]
+    fn tool_hint_no_match_on_single_keyword() {
+        let specs = vec![make_tool_spec(
+            "ask_user",
+            "Ask the user a question and wait for their response",
+        )];
+        // Only "deploy" matches nothing in the tool — needs >= 2 hits
+        let hint = build_tool_hint(&specs, "deploy this service now");
+        assert!(hint.is_empty());
+    }
+
+    #[test]
+    fn tool_hint_capped_at_three() {
+        let specs = vec![
+            make_tool_spec("tool_a", "search files quickly"),
+            make_tool_spec("tool_b", "search code quickly"),
+            make_tool_spec("tool_c", "search logs quickly"),
+            make_tool_spec("tool_d", "search metrics quickly"),
+        ];
+        let hint = build_tool_hint(&specs, "search quickly for something");
+        let count = hint.matches("- tool_").count();
+        assert!(count <= 3, "expected at most 3 tool hints, got {count}");
+    }
+
+    #[test]
+    fn tool_hint_short_words_ignored() {
+        let specs = vec![make_tool_spec("ask_user", "Ask the user a question")];
+        // "is" and "it" are < 3 chars, filtered out
+        let hint = build_tool_hint(&specs, "is it ok");
         assert!(hint.is_empty());
     }
 

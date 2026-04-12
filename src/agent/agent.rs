@@ -763,7 +763,9 @@ impl Agent {
         }
 
         let skill_hint = crate::agent::prompt::build_skill_hint(&self.skills, user_message);
+        let tool_hint = crate::agent::prompt::build_tool_hint(&self.tool_specs, user_message);
         context.push_str(&skill_hint);
+        context.push_str(&tool_hint);
         let enriched = crate::agent::prompt::timestamp_prefix(user_message, Some(&context));
 
         self.history
@@ -935,7 +937,9 @@ impl Agent {
         }
 
         let skill_hint = crate::agent::prompt::build_skill_hint(&self.skills, user_message);
+        let tool_hint = crate::agent::prompt::build_tool_hint(&self.tool_specs, user_message);
         context.push_str(&skill_hint);
+        context.push_str(&tool_hint);
         let enriched = crate::agent::prompt::timestamp_prefix(user_message, Some(&context));
 
         self.history

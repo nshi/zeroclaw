@@ -3753,7 +3753,10 @@ pub async fn run(
         )
         .await;
         let skill_hint = crate::agent::prompt::build_skill_hint(&skills, &effective_msg);
-        let context = format!("{mem_context}{skill_hint}");
+        let loop_tool_specs: Vec<crate::tools::ToolSpec> =
+            tools_registry.iter().map(|t| t.spec()).collect();
+        let tool_hint = crate::agent::prompt::build_tool_hint(&loop_tool_specs, &effective_msg);
+        let context = format!("{mem_context}{skill_hint}{tool_hint}");
         let enriched = crate::agent::prompt::timestamp_prefix(&effective_msg, Some(&context));
 
         let mut history = vec![
@@ -4014,7 +4017,11 @@ pub async fn run(
             )
             .await;
             let skill_hint = crate::agent::prompt::build_skill_hint(&skills, &effective_input);
-            let context = format!("{mem_context}{skill_hint}");
+            let repl_tool_specs: Vec<crate::tools::ToolSpec> =
+                tools_registry.iter().map(|t| t.spec()).collect();
+            let tool_hint =
+                crate::agent::prompt::build_tool_hint(&repl_tool_specs, &effective_input);
+            let context = format!("{mem_context}{skill_hint}{tool_hint}");
             let enriched = crate::agent::prompt::timestamp_prefix(&effective_input, Some(&context));
 
             history.push(ChatMessage::user(&enriched));
@@ -4448,7 +4455,10 @@ pub async fn process_message(
     )
     .await;
     let skill_hint = crate::agent::prompt::build_skill_hint(&skills, effective_msg_ref);
-    let context = format!("{mem_context}{skill_hint}");
+    let pm_tool_specs: Vec<crate::tools::ToolSpec> =
+        tools_registry.iter().map(|t| t.spec()).collect();
+    let tool_hint = crate::agent::prompt::build_tool_hint(&pm_tool_specs, effective_msg_ref);
+    let context = format!("{mem_context}{skill_hint}{tool_hint}");
     let enriched = crate::agent::prompt::timestamp_prefix(effective_msg_ref, Some(&context));
 
     let mut history = vec![
