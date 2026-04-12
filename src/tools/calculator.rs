@@ -33,6 +33,7 @@ impl Tool for CalculatorTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "function": {
                     "type": "string",

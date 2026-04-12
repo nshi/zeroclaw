@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use async_trait::async_trait;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -231,25 +232,30 @@ impl Tool for BackupTool {
     }
 
     fn description(&self) -> &str {
-        "Create, list, verify, and restore workspace backups"
+        "Create, list, verify, and restore timestamped workspace backups. \
+         Backs up configured subdirectories to workspace/backups/ with SHA-256 manifest \
+         integrity checking. Old backups are automatically pruned to the configured max_keep limit. \
+         Use 'verify' to check backup integrity before restoring."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "command": {
                     "type": "string",
                     "enum": ["create", "list", "verify", "restore"],
-                    "description": "Backup command to execute"
+                    "description": "Backup command: 'create' takes a new snapshot, 'list' shows available backups, 'verify' checks SHA-256 integrity, 'restore' copies backup files back to workspace."
                 },
                 "backup_name": {
                     "type": "string",
-                    "description": "Name of backup (for verify/restore)"
+                    "description": "Name of the backup (required for verify and restore). Use 'list' to see available names."
                 },
                 "confirm": {
                     "type": "boolean",
-                    "description": "Confirm restore (required for actual restore, default false)"
+                    "description": "Must be true to execute a restore (safety guard against accidental overwrites). Default: false.",
+                    "default": false
                 }
             },
             "required": ["command"]
@@ -272,17 +278,11 @@ impl Tool for BackupTool {
             "create" => self.cmd_create().await,
             "list" => self.cmd_list().await,
             "verify" => {
-                let name = args
-                    .get("backup_name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'backup_name' for verify"))?;
+                let name = require_str!(args, "backup_name");
                 self.cmd_verify(name).await
             }
             "restore" => {
-                let name = args
-                    .get("backup_name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'backup_name' for restore"))?;
+                let name = require_str!(args, "backup_name");
                 let confirm = args
                     .get("confirm")
                     .and_then(|v| v.as_bool())

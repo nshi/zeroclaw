@@ -29,6 +29,7 @@ impl Tool for MemoryRecallTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "query": {
                     "type": "string",
@@ -36,6 +37,7 @@ impl Tool for MemoryRecallTool {
                 },
                 "limit": {
                     "type": "integer",
+                    "minimum": 1,
                     "description": "Max results to return (default: 5)"
                 },
                 "since": {

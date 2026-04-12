@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::config::OpenCodeCliConfig;
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -45,6 +46,7 @@ impl Tool for OpenCodeCliTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "prompt": {
                     "type": "string",
@@ -82,10 +84,7 @@ impl Tool for OpenCodeCliTool {
         }
 
         // Extract prompt (required)
-        let prompt = args
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'prompt' parameter"))?;
+        let prompt = require_str!(args, "prompt");
 
         // Validate working directory — require both paths to exist (reject
         // non-existent paths instead of falling back to the raw value, which
@@ -306,9 +305,9 @@ mod tests {
     #[tokio::test]
     async fn opencode_cli_missing_prompt_param() {
         let tool = OpenCodeCliTool::new(test_security(AutonomyLevel::Supervised), test_config());
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("prompt"));
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("prompt"));
     }
 
     #[tokio::test]

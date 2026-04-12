@@ -24,25 +24,29 @@ impl Tool for ModelSwitchTool {
     }
 
     fn description(&self) -> &str {
-        "Switch the AI model at runtime. Use 'get' to see current model, 'list_providers' to see available providers, 'list_models' to see models for a provider, or 'set' to switch to a different model. The switch takes effect immediately for the current conversation."
+        "Switch the AI model at runtime. The switch is conversation-scoped — it takes effect \
+         immediately but does not persist across sessions. Use 'get' to see the current model, \
+         'list_providers' to see available providers, 'list_models' to see models for a provider, \
+         or 'set' to switch. Useful for routing to cheaper/faster models for simple subtasks."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "action": {
                     "type": "string",
                     "enum": ["get", "set", "list_providers", "list_models"],
-                    "description": "Action to perform: get current model, set a new model, list available providers, or list models for a provider"
+                    "description": "Action to perform: 'get' shows current model, 'set' switches model (requires provider + model), 'list_providers' shows available providers, 'list_models' shows models for a provider."
                 },
                 "provider": {
                     "type": "string",
-                    "description": "Provider name (e.g., 'openai', 'anthropic', 'groq', 'ollama'). Required for 'set' and 'list_models' actions."
+                    "description": "Provider name (e.g., 'openai', 'anthropic', 'groq', 'ollama'). Required for 'set' and 'list_models'."
                 },
                 "model": {
                     "type": "string",
-                    "description": "Model ID (e.g., 'gpt-4o', 'claude-sonnet-4-6'). Required for 'set' action."
+                    "description": "Model ID (e.g., 'gpt-4o', 'claude-sonnet-4-6'). Required for 'set'."
                 }
             },
             "required": ["action"]

@@ -6,6 +6,7 @@
 //! Supports optional blocking mode to wait for a human response.
 
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::channels::traits::{Channel, ChannelMessage, SendMessage};
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -181,27 +182,32 @@ impl Tool for EscalateToHumanTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "summary": {
                     "type": "string",
-                    "description": "One-line escalation summary"
+                    "maxLength": 200,
+                    "description": "One-line escalation summary (max 200 characters)."
                 },
                 "context": {
                     "type": "string",
-                    "description": "Detailed context for the human"
+                    "description": "Detailed context for the human — include what you tried, what failed, and what decision you need."
                 },
                 "urgency": {
                     "type": "string",
                     "enum": ["low", "medium", "high", "critical"],
-                    "description": "Urgency level (default: medium). high/critical triggers Pushover notification."
+                    "description": "Urgency level (default: medium). 'high' and 'critical' also trigger a Pushover mobile push notification when configured."
                 },
                 "wait_for_response": {
                     "type": "boolean",
-                    "description": "Block and return the human's reply (default: false)"
+                    "description": "Block execution and wait for the human to reply (default: false). When true, the tool returns the human's response text.",
+                    "default": false
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Seconds to wait for a response when wait_for_response is true (default: 600)"
+                    "minimum": 1,
+                    "description": "Seconds to wait for a response when wait_for_response is true (default: 600).",
+                    "default": 600
                 }
             },
             "required": ["summary"]
@@ -222,13 +228,11 @@ impl Tool for EscalateToHumanTool {
         }
 
         // Parse required params
-        let summary = args
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'summary' parameter"))?
-            .to_string();
+        let summary = require_str!(args, "summary").trim();
+        if summary.is_empty() {
+            return ToolResult::err("Missing required parameter 'summary'");
+        }
+        let summary = summary.to_string();
 
         let context = args
             .get("context")

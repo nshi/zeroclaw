@@ -31,6 +31,7 @@ impl Tool for MemoryExportTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "namespace": {
                     "type": "string",

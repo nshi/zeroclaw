@@ -6,6 +6,7 @@
 //! the pattern used by [`DelegateTool`] for its parent-tools handle.
 
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::channels::traits::Channel;
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -61,6 +62,7 @@ impl Tool for ReactionTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "channel": {
                     "type": "string",
@@ -101,25 +103,13 @@ impl Tool for ReactionTool {
             });
         }
 
-        let channel_name = args
-            .get("channel")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'channel' parameter"))?;
+        let channel_name = require_str!(args, "channel");
 
-        let channel_id = args
-            .get("channel_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'channel_id' parameter"))?;
+        let channel_id = require_str!(args, "channel_id");
 
-        let message_id = args
-            .get("message_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'message_id' parameter"))?;
+        let message_id = require_str!(args, "message_id");
 
-        let emoji = args
-            .get("emoji")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'emoji' parameter"))?;
+        let emoji = require_str!(args, "emoji");
 
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("add");
 
@@ -409,26 +399,34 @@ mod tests {
         // Missing channel
         let result = tool
             .execute(json!({"channel_id": "c1", "message_id": "1", "emoji": "x"}))
-            .await;
-        assert!(result.is_err());
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
 
         // Missing channel_id
         let result = tool
             .execute(json!({"channel": "test", "message_id": "1", "emoji": "x"}))
-            .await;
-        assert!(result.is_err());
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
 
         // Missing message_id
         let result = tool
             .execute(json!({"channel": "a", "channel_id": "c1", "emoji": "x"}))
-            .await;
-        assert!(result.is_err());
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
 
         // Missing emoji
         let result = tool
             .execute(json!({"channel": "a", "channel_id": "c1", "message_id": "1"}))
-            .await;
-        assert!(result.is_err());
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

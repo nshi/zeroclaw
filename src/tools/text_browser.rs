@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -145,14 +146,17 @@ impl Tool for TextBrowserTool {
     }
 
     fn description(&self) -> &str {
-        "Render a web page as plain text using a text-based browser (lynx, links, or w3m). \
-         Ideal for headless/SSH environments without a graphical browser. \
-         Auto-detects available browser or uses a configured preference."
+        "Render a web page as plain text by shelling out to a text-based browser (lynx, links, or \
+         w3m). Unlike web_fetch which uses an HTTP client, this tool runs a real browser engine that \
+         can handle JavaScript-light pages and complex layouts. Requires at least one text browser \
+         to be installed on the system. Best for headless/SSH environments; use web_fetch for simple \
+         page fetching."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "url": {
                     "type": "string",
@@ -160,7 +164,7 @@ impl Tool for TextBrowserTool {
                 },
                 "browser": {
                     "type": "string",
-                    "description": "Text browser to use: \"lynx\", \"links\", or \"w3m\". If omitted, auto-detects an available browser.",
+                    "description": "Text browser to use. If omitted, auto-detects the first available browser.",
                     "enum": ["lynx", "links", "w3m"]
                 }
             },
@@ -169,10 +173,7 @@ impl Tool for TextBrowserTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let url = args
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'url' parameter"))?;
+        let url = require_str!(args, "url");
 
         if !self.security.can_act() {
             return Ok(ToolResult {

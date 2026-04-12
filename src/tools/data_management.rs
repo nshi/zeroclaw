@@ -79,21 +79,26 @@ impl Tool for DataManagementTool {
     }
 
     fn description(&self) -> &str {
-        "Workspace data retention, purge, and storage statistics"
+        "Manage workspace data lifecycle: check retention status, purge old files, or view storage \
+         statistics. Files older than the configured retention period are candidates for purge. \
+         Unlike file_write/file_read which operate on individual files, this tool manages bulk \
+         data lifecycle across the entire workspace directory."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "command": {
                     "type": "string",
                     "enum": ["retention_status", "purge", "stats"],
-                    "description": "Data management command"
+                    "description": "Command: 'retention_status' shows how many files exceed retention age, 'purge' deletes files older than retention period, 'stats' shows total file count and size with per-subdirectory breakdown."
                 },
                 "dry_run": {
                     "type": "boolean",
-                    "description": "If true, purge only lists what would be deleted (default true)"
+                    "description": "When true, purge only lists what would be deleted without actually deleting. Default: true.",
+                    "default": true
                 }
             },
             "required": ["command"]

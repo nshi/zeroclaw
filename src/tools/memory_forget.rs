@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::memory::Memory;
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -31,6 +32,7 @@ impl Tool for MemoryForgetTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "key": {
                     "type": "string",
@@ -42,10 +44,7 @@ impl Tool for MemoryForgetTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let key = args
-            .get("key")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'key' parameter"))?;
+        let key = require_str!(args, "key");
 
         if let Err(error) = self
             .security
@@ -131,8 +130,9 @@ mod tests {
     async fn forget_missing_key() {
         let (_tmp, mem) = test_mem();
         let tool = MemoryForgetTool::new(mem, test_security());
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

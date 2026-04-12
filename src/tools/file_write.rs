@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -22,12 +23,15 @@ impl Tool for FileWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Write contents to a file in the workspace"
+        "Write contents to a file in the workspace. Creates the file and parent directories \
+         if they do not exist; overwrites the file if it does. Use file_edit for \
+         targeted search-and-replace changes to existing files."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -35,7 +39,7 @@ impl Tool for FileWriteTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Content to write to the file"
+                    "description": "Content to write to the file. Overwrites any existing content."
                 }
             },
             "required": ["path", "content"]
@@ -43,15 +47,12 @@ impl Tool for FileWriteTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
+        let path = require_str!(args, "path");
 
-        let content = args
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?;
+        let content = match args.get("content").and_then(|v| v.as_str()) {
+            Some(v) => v,
+            None => return ToolResult::err("Missing required parameter 'content'"),
+        };
 
         if !self.security.can_act() {
             return Ok(ToolResult {
@@ -343,15 +344,17 @@ mod tests {
     #[tokio::test]
     async fn file_write_missing_path_param() {
         let tool = FileWriteTool::new(test_security(std::env::temp_dir()));
-        let result = tool.execute(json!({"content": "data"})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({"content": "data"})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]
     async fn file_write_missing_content_param() {
         let tool = FileWriteTool::new(test_security(std::env::temp_dir()));
-        let result = tool.execute(json!({"path": "file.txt"})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({"path": "file.txt"})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

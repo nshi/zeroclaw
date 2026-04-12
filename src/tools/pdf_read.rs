@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -43,6 +44,7 @@ impl Tool for PdfReadTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -60,10 +62,7 @@ impl Tool for PdfReadTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
+        let path = require_str!(args, "path");
 
         let max_chars = args
             .get("max_chars")
@@ -287,9 +286,9 @@ mod tests {
     #[tokio::test]
     async fn missing_path_param_returns_error() {
         let tool = PdfReadTool::new(test_security(std::env::temp_dir()));
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("path"));
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("path"));
     }
 
     #[tokio::test]

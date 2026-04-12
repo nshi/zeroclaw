@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -131,6 +132,7 @@ impl Tool for ImageInfoTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -146,10 +148,7 @@ impl Tool for ImageInfoTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let path_str = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
+        let path_str = require_str!(args, "path");
 
         let include_base64 = args
             .get("include_base64")
@@ -409,8 +408,9 @@ mod tests {
     #[tokio::test]
     async fn execute_missing_path() {
         let tool = ImageInfoTool::new(test_security());
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

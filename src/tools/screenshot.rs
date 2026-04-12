@@ -222,20 +222,25 @@ impl Tool for ScreenshotTool {
     }
 
     fn description(&self) -> &str {
-        "Capture a screenshot of the current screen. Returns the file path and base64-encoded PNG data."
+        "Capture a screenshot of the current screen. Requires a display server (X11/Wayland on Linux, \
+         macOS desktop). Returns the file path and base64-encoded PNG data (max ~1.5 MB image). \
+         On macOS uses screencapture; on Linux tries gnome-screenshot, scrot, or ImageMagick import. \
+         Not available in headless/SSH-only environments."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "filename": {
                     "type": "string",
-                    "description": "Optional filename (default: screenshot_<timestamp>.png). Saved in workspace."
+                    "description": "Output filename (default: screenshot_<timestamp>.png). Saved in workspace. Path components are stripped for safety."
                 },
                 "region": {
                     "type": "string",
-                    "description": "Optional region for macOS: 'selection' for interactive crop, 'window' for front window. Ignored on Linux."
+                    "enum": ["selection", "window"],
+                    "description": "macOS only: 'selection' for interactive crop, 'window' for front window. Ignored on Linux (always captures full screen)."
                 }
             }
         })

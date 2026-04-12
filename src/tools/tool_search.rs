@@ -110,6 +110,7 @@ impl Tool for ToolSearchTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "query": {
                     "description": "Query to find tools. Use \"select:<tool_name>\" for direct selection, or keywords to search (e.g. \"git\", \"web search\", \"image\").",

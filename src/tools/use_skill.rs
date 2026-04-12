@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::PathBuf;
@@ -90,6 +91,7 @@ impl Tool for UseSkillTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "name": {
                     "type": "string",
@@ -101,12 +103,10 @@ impl Tool for UseSkillTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let raw_name = args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'name' parameter"))?;
+        let raw_name = require_str!(args, "name").trim();
+        if raw_name.is_empty() {
+            return ToolResult::err("Missing required parameter 'name'");
+        }
 
         // Strip leading '/' so `/commit` resolves to `commit`.
         let requested = raw_name.strip_prefix('/').unwrap_or(raw_name);

@@ -7,6 +7,7 @@
 //! [`ReactionTool`](super::reaction::ReactionTool).
 
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::channels::traits::{Channel, ChannelMessage, SendMessage};
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -82,6 +83,7 @@ impl Tool for AskUserTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "question": {
                     "type": "string",
@@ -119,13 +121,11 @@ impl Tool for AskUserTool {
         }
 
         // Parse required params
-        let question = args
-            .get("question")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'question' parameter"))?
-            .to_string();
+        let question = require_str!(args, "question").trim();
+        if question.is_empty() {
+            return ToolResult::err("Missing required parameter 'question'");
+        }
+        let question = question.to_string();
 
         let choices: Option<Vec<String>> = args.get("choices").and_then(|v| {
             v.as_array().map(|arr| {
@@ -385,8 +385,9 @@ mod tests {
             "test",
             Arc::new(SilentChannel::new("test")) as Arc<dyn Channel>,
         )]);
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]
@@ -395,8 +396,9 @@ mod tests {
             "test",
             Arc::new(SilentChannel::new("test")) as Arc<dyn Channel>,
         )]);
-        let result = tool.execute(json!({ "question": "  " })).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({ "question": "  " })).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

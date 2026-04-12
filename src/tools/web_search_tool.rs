@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use super::web_search_provider_routing::{WebSearchProviderRoute, resolve_web_search_provider};
 use async_trait::async_trait;
 use regex::Regex;
@@ -387,6 +388,7 @@ impl Tool for WebSearchTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "query": {
                     "type": "string",
@@ -398,10 +400,7 @@ impl Tool for WebSearchTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let query = args
-            .get("query")
-            .and_then(|q| q.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: query"))?;
+        let query = require_str!(args, "query");
 
         if query.trim().is_empty() {
             anyhow::bail!("Search query cannot be empty");
@@ -509,15 +508,17 @@ mod tests {
     #[tokio::test]
     async fn test_execute_missing_query() {
         let tool = WebSearchTool::new("duckduckgo".to_string(), None, 5, 15);
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]
     async fn test_execute_empty_query() {
         let tool = WebSearchTool::new("duckduckgo".to_string(), None, 5, 15);
-        let result = tool.execute(json!({"query": ""})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({"query": ""})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

@@ -42,9 +42,17 @@ impl Tool for CronRunsTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
-                "job_id": { "type": "string" },
-                "limit": { "type": "integer" }
+                "job_id": {
+                    "type": "string",
+                    "description": "Cron job ID to query runs for"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum number of runs to return (default: 50)"
+                }
             },
             "required": ["job_id"]
         })

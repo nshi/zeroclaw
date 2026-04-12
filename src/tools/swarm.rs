@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::config::{DelegateAgentConfig, SwarmConfig, SwarmStrategy};
 use crate::providers::{self, Provider};
 use crate::security::SecurityPolicy;
@@ -424,8 +425,11 @@ impl Tool for SwarmTool {
     }
 
     fn description(&self) -> &str {
-        "Orchestrate a swarm of agents to collaboratively handle a task. Supports sequential \
-         (pipeline), parallel (fan-out/fan-in), and router (LLM-selected) strategies."
+        "Orchestrate a named swarm of agents to collaboratively handle a task. Three strategies: \
+         'pipeline' chains agents sequentially (output of one feeds the next), 'parallel' fans out \
+         to all agents simultaneously and collects results, 'router' uses an LLM to select the best \
+         agent for the task. Use swarm for predefined multi-agent workflows; use delegate for \
+         ad-hoc single-agent delegation."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -461,11 +465,7 @@ impl Tool for SwarmTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let swarm_name = args
-            .get("swarm")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .ok_or_else(|| anyhow::anyhow!("Missing 'swarm' parameter"))?;
+        let swarm_name = require_str!(args, "swarm").trim();
 
         if swarm_name.is_empty() {
             return Ok(ToolResult {
@@ -475,11 +475,7 @@ impl Tool for SwarmTool {
             });
         }
 
-        let prompt = args
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .ok_or_else(|| anyhow::anyhow!("Missing 'prompt' parameter"))?;
+        let prompt = require_str!(args, "prompt").trim();
 
         if prompt.is_empty() {
             return Ok(ToolResult {
@@ -716,8 +712,9 @@ mod tests {
             test_security(),
             providers::ProviderRuntimeOptions::default(),
         );
-        let result = tool.execute(json!({"prompt": "test"})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({"prompt": "test"})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]
@@ -729,8 +726,9 @@ mod tests {
             test_security(),
             providers::ProviderRuntimeOptions::default(),
         );
-        let result = tool.execute(json!({"swarm": "pipeline"})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({"swarm": "pipeline"})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

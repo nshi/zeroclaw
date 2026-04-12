@@ -56,14 +56,17 @@ impl Tool for LlmTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Run a prompt through an LLM with no tool access and return the response. \
-         Optionally validates the output against a JSON Schema. Ideal for structured \
-         data extraction, classification, summarization, and transformation tasks."
+        "Run a prompt through an LLM with no tool access and return the raw text response. \
+         The sub-LLM cannot call tools or access files — it only generates text. \
+         Optionally validates the output against a JSON Schema for structured extraction. \
+         Ideal for classification, summarization, transformation, and data extraction tasks \
+         that don't need tool access. Consumes an additional LLM API call."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "prompt": {
                     "type": "string",
@@ -82,6 +85,8 @@ impl Tool for LlmTaskTool {
                 },
                 "temperature": {
                     "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 2.0,
                     "description": "Optional temperature override (0.0-2.0). \
                                     Defaults to the configured default temperature."
                 }

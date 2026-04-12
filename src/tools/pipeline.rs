@@ -216,13 +216,16 @@ impl Tool for PipelineTool {
 
     fn description(&self) -> &str {
         "Execute a multi-step tool pipeline in a single call. Steps run sequentially by default \
-         with result interpolation (use {{step[N].result}} to reference prior outputs), \
-         or in parallel when 'parallel: true' is set."
+         with result interpolation (use {{step[N].result}} to reference prior step outputs), \
+         or in parallel when 'parallel: true' is set (no interpolation in parallel mode). \
+         Useful for chaining tool calls where later steps depend on earlier results. \
+         Each step specifies a tool name and its arguments."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "steps": {
                     "type": "array",

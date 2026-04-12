@@ -1,12 +1,59 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// Result of a tool execution
+/// Result of a tool execution.
+///
+/// `output` should be plain text optimized for LLM consumption.
+/// Use readable formatting (not raw JSON) for structured data.
+/// Include truncation notices when output is capped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub success: bool,
     pub output: String,
     pub error: Option<String>,
+}
+
+impl ToolResult {
+    /// Convenience constructor for expected error results.
+    ///
+    /// Use for missing params, invalid input, rate limits, permission denied.
+    /// Reserve `Err(anyhow)` for truly unexpected infrastructure failures only.
+    pub fn err(msg: impl Into<String>) -> anyhow::Result<Self> {
+        Ok(Self {
+            success: false,
+            output: String::new(),
+            error: Some(msg.into()),
+        })
+    }
+
+    /// Convenience constructor for successful results.
+    pub fn ok(output: impl Into<String>) -> anyhow::Result<Self> {
+        Ok(Self {
+            success: true,
+            output: output.into(),
+            error: None,
+        })
+    }
+}
+
+/// Extract a required string parameter from JSON args, returning a `ToolResult`
+/// error (not an `Err(anyhow)`) if missing. Use in `Tool::execute()` methods:
+///
+/// ```ignore
+/// let path = require_str!(args, "path");
+/// ```
+#[macro_export]
+macro_rules! require_str {
+    ($args:expr, $param:expr) => {
+        match $args.get($param).and_then(|v| v.as_str()) {
+            Some(v) if !v.is_empty() => v,
+            _ => {
+                return $crate::tools::traits::ToolResult::err(
+                    format!("Missing required parameter '{}'", $param),
+                );
+            }
+        }
+    };
 }
 
 /// Description of a tool for the LLM

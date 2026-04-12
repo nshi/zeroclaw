@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::config::schema::FirecrawlConfig;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
@@ -277,6 +278,7 @@ impl Tool for WebFetchTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "url": {
                     "type": "string",
@@ -288,10 +290,7 @@ impl Tool for WebFetchTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let url = args
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'url' parameter"))?;
+        let url = require_str!(args, "url");
 
         if !self.security.can_act() {
             return Ok(ToolResult {

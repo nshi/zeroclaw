@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::config::GoogleWorkspaceAllowedOperation;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
@@ -133,50 +134,54 @@ impl Tool for GoogleWorkspaceTool {
     }
 
     fn description(&self) -> &str {
-        "Interact with Google Workspace services (Drive, Gmail, Calendar, Sheets, Docs, etc.) \
-         via the gws CLI. Requires gws to be installed and authenticated."
+        "Interact with Google Workspace services via the gws CLI. Follows a three-level hierarchy: \
+         service (e.g. gmail, drive, calendar) → resource (e.g. messages, files, events) → method \
+         (e.g. list, get, create, update, delete). Requires gws to be installed and authenticated \
+         via 'gws auth login'. Operations may be restricted by the configured allowlist."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "service": {
                     "type": "string",
-                    "description": "Google Workspace service (e.g. drive, gmail, calendar, sheets, docs, slides, tasks, people, chat, classroom, forms, keep, meet, events)"
+                    "description": "Google Workspace service: drive, gmail, calendar, sheets, docs, slides, tasks, people, chat, classroom, forms, keep, meet, events."
                 },
                 "resource": {
                     "type": "string",
-                    "description": "Service resource (e.g. files, messages, events, spreadsheets)"
+                    "description": "Resource within the service (e.g. 'files' for drive, 'messages' for gmail, 'events' for calendar, 'spreadsheets' for sheets)."
                 },
                 "method": {
                     "type": "string",
-                    "description": "Method to call on the resource (e.g. list, get, create, update, delete)"
+                    "description": "API method to call: list, get, create, update, delete, send, etc."
                 },
                 "sub_resource": {
                     "type": "string",
-                    "description": "Optional sub-resource for nested operations"
+                    "description": "Optional nested resource (e.g. 'attachments' under gmail messages, 'permissions' under drive files)."
                 },
                 "params": {
                     "type": "object",
-                    "description": "URL/query parameters as key-value pairs (passed as --params JSON)"
+                    "description": "Query parameters as key-value pairs. Examples: {\"q\": \"is:unread\"} for gmail, {\"q\": \"name contains 'report'\"} for drive."
                 },
                 "body": {
                     "type": "object",
-                    "description": "Request body for POST/PATCH/PUT operations (passed as --json JSON)"
+                    "description": "Request body for create/update/send methods (passed as JSON)."
                 },
                 "format": {
                     "type": "string",
                     "enum": ["json", "table", "yaml", "csv"],
-                    "description": "Output format (default: json)"
+                    "description": "Output format (default: json)."
                 },
                 "page_all": {
                     "type": "boolean",
-                    "description": "Auto-paginate through all results"
+                    "description": "Auto-paginate through all results (default: false)."
                 },
                 "page_limit": {
                     "type": "integer",
-                    "description": "Max pages to fetch when using page_all (default: 10)"
+                    "minimum": 1,
+                    "description": "Max pages to fetch when page_all is true (default: 10)."
                 }
             },
             "required": ["service", "resource", "method"]
@@ -185,18 +190,9 @@ impl Tool for GoogleWorkspaceTool {
 
     /// Execute a Google Workspace CLI command with input validation and security enforcement.
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let service = args
-            .get("service")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'service' parameter"))?;
-        let resource = args
-            .get("resource")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'resource' parameter"))?;
-        let method = args
-            .get("method")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'method' parameter"))?;
+        let service = require_str!(args, "service");
+        let resource = require_str!(args, "resource");
+        let method = require_str!(args, "method");
 
         // Extract and validate sub_resource early so the allowlist check can account for it.
         let sub_resource: Option<&str> = if let Some(sub_resource_value) = args.get("sub_resource")
@@ -758,8 +754,9 @@ mod tests {
     async fn missing_required_param_returns_error() {
         let tool =
             GoogleWorkspaceTool::new(test_security(), vec![], vec![], None, None, 60, 30, false);
-        let result = tool.execute(json!({"service": "drive"})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({"service": "drive"})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

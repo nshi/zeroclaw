@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::runtime::RuntimeAdapter;
 use crate::security::SecurityPolicy;
 use crate::security::traits::Sandbox;
@@ -114,20 +115,26 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command in the workspace directory"
+        "Execute a shell command in the workspace directory. \
+         Prefer file_read, file_write, file_edit, glob_search, or content_search when those tools \
+         can accomplish the task — shell is for commands that require process execution (build, test, \
+         git, package managers, etc.). Commands time out after 60 seconds and stdout/stderr are \
+         truncated at 1 MB. Only safe environment variables (PATH, HOME, etc.) are passed — API keys \
+         and secrets are filtered out."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute"
+                    "description": "The shell command to execute. Runs via /bin/sh -c on Unix."
                 },
                 "approved": {
                     "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk commands in supervised mode",
+                    "description": "Set true to explicitly approve medium/high-risk commands in supervised mode. Required for commands that modify files, install packages, or access the network.",
                     "default": false
                 }
             },
@@ -136,10 +143,7 @@ impl Tool for ShellTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let command = args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'command' parameter"))?;
+        let command = require_str!(args, "command");
         let approved = args
             .get("approved")
             .and_then(|v| v.as_bool())
@@ -352,16 +356,17 @@ mod tests {
     #[tokio::test]
     async fn shell_missing_command_param() {
         let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("command"));
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("command"));
     }
 
     #[tokio::test]
     async fn shell_wrong_type_param() {
         let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
-        let result = tool.execute(json!({"command": 123})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({"command": 123})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

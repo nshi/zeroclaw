@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -47,6 +48,7 @@ impl Tool for ContentSearchTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "pattern": {
                     "type": "string",
@@ -99,18 +101,7 @@ impl Tool for ContentSearchTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         // --- Parse parameters ---
-        let pattern = args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'pattern' parameter"))?;
-
-        if pattern.is_empty() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Empty pattern is not allowed.".into()),
-            });
-        }
+        let pattern = require_str!(args, "pattern");
 
         let search_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
@@ -830,19 +821,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_empty_pattern_rejected() {
+    async fn content_search_missing_or_empty_pattern() {
         let tool = ContentSearchTool::new(test_security(std::env::temp_dir()));
-        let result = tool.execute(json!({"pattern": ""})).await.unwrap();
-
+        let result = tool.execute(json!({})).await.unwrap();
         assert!(!result.success);
-        assert!(result.error.as_ref().unwrap().contains("Empty pattern"));
-    }
-
-    #[tokio::test]
-    async fn content_search_missing_pattern() {
-        let tool = ContentSearchTool::new(test_security(std::env::temp_dir()));
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

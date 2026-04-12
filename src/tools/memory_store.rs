@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::memory::{Memory, MemoryCategory};
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -31,6 +32,7 @@ impl Tool for MemoryStoreTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "key": {
                     "type": "string",
@@ -50,15 +52,9 @@ impl Tool for MemoryStoreTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let key = args
-            .get("key")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'key' parameter"))?;
+        let key = require_str!(args, "key");
 
-        let content = args
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?;
+        let content = require_str!(args, "content");
 
         let category = match args.get("category").and_then(|v| v.as_str()) {
             Some("core") | None => MemoryCategory::Core,
@@ -168,16 +164,18 @@ mod tests {
     async fn store_missing_key() {
         let (_tmp, mem) = test_mem();
         let tool = MemoryStoreTool::new(mem, test_security());
-        let result = tool.execute(json!({"content": "no key"})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({"content": "no key"})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]
     async fn store_missing_content() {
         let (_tmp, mem) = test_mem();
         let tool = MemoryStoreTool::new(mem, test_security());
-        let result = tool.execute(json!({"key": "no_content"})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({"key": "no_content"})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

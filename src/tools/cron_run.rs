@@ -31,6 +31,7 @@ impl Tool for CronRunTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "job_id": { "type": "string" },
                 "approved": {

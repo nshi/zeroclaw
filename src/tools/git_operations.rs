@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::security::{AutonomyLevel, SecurityPolicy};
 use async_trait::async_trait;
 use serde_json::json;
@@ -346,10 +347,7 @@ impl GitOperationsTool {
         args: serde_json::Value,
         working_dir: &std::path::Path,
     ) -> anyhow::Result<ToolResult> {
-        let message = args
-            .get("message")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'message' parameter"))?;
+        let message = require_str!(args, "message");
 
         // Sanitize commit message
         let sanitized = message
@@ -420,10 +418,7 @@ impl GitOperationsTool {
         args: serde_json::Value,
         working_dir: &std::path::Path,
     ) -> anyhow::Result<ToolResult> {
-        let branch = args
-            .get("branch")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'branch' parameter"))?;
+        let branch = require_str!(args, "branch");
 
         // Sanitize branch name
         let sanitized = self.sanitize_git_args(branch)?;
@@ -515,6 +510,7 @@ impl Tool for GitOperationsTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "operation": {
                     "type": "string",

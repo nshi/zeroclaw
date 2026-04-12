@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::config::ClaudeCodeConfig;
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -46,6 +47,7 @@ impl Tool for ClaudeCodeTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "prompt": {
                     "type": "string",
@@ -100,10 +102,7 @@ impl Tool for ClaudeCodeTool {
         }
 
         // Extract prompt (required)
-        let prompt = args
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'prompt' parameter"))?;
+        let prompt = require_str!(args, "prompt");
 
         // Extract optional params
         let allowed_tools: Vec<String> = args
@@ -411,9 +410,9 @@ mod tests {
     #[tokio::test]
     async fn claude_code_missing_prompt_param() {
         let tool = ClaudeCodeTool::new(test_security(AutonomyLevel::Supervised), test_config());
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("prompt"));
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("prompt"));
     }
 
     #[tokio::test]

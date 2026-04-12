@@ -5,6 +5,7 @@ use serde_json::json;
 use tracing::warn;
 
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::sop::types::{SopEvent, SopRunAction, SopTriggerSource};
 use crate::sop::{SopAuditLogger, SopEngine};
 
@@ -41,6 +42,7 @@ impl Tool for SopExecuteTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "name": {
                     "type": "string",
@@ -56,10 +58,7 @@ impl Tool for SopExecuteTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let sop_name = args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'name' parameter"))?;
+        let sop_name = require_str!(args, "name");
 
         let payload = args
             .get("payload")
@@ -240,8 +239,9 @@ mod tests {
     async fn execute_missing_name() {
         let engine = engine_with_sops(vec![]);
         let tool = SopExecuteTool::new(engine);
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

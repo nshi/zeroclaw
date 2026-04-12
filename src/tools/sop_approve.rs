@@ -5,6 +5,7 @@ use serde_json::json;
 use tracing::warn;
 
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::sop::types::SopRunAction;
 use crate::sop::{SopAuditLogger, SopEngine, SopMetricsCollector};
 
@@ -48,6 +49,7 @@ impl Tool for SopApproveTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "run_id": {
                     "type": "string",
@@ -59,10 +61,7 @@ impl Tool for SopApproveTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let run_id = args
-            .get("run_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'run_id' parameter"))?;
+        let run_id = require_str!(args, "run_id");
 
         // Lock engine, approve, snapshot run for audit, then drop lock
         let (result, run_snapshot) = {
@@ -199,8 +198,9 @@ mod tests {
     async fn approve_missing_run_id() {
         let engine = Arc::new(Mutex::new(SopEngine::new(SopConfig::default())));
         let tool = SopApproveTool::new(engine);
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[test]

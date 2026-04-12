@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::agent::loop_::run_tool_call_loop;
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
 use crate::config::{DelegateAgentConfig, DelegateToolConfig};
@@ -304,11 +305,7 @@ impl Tool for DelegateTool {
         }
 
         // --- Single-agent delegation (synchronous or background) ---
-        let agent_name = args
-            .get("agent")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .ok_or_else(|| anyhow::anyhow!("Missing 'agent' parameter"))?;
+        let agent_name = require_str!(args, "agent").trim();
 
         if agent_name.is_empty() {
             return Ok(ToolResult {
@@ -318,11 +315,7 @@ impl Tool for DelegateTool {
             });
         }
 
-        let prompt = args
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .ok_or_else(|| anyhow::anyhow!("Missing 'prompt' parameter"))?;
+        let prompt = require_str!(args, "prompt").trim();
 
         if prompt.is_empty() {
             return Ok(ToolResult {
@@ -706,11 +699,7 @@ impl DelegateTool {
         parallel_agents: &[serde_json::Value],
         args: &serde_json::Value,
     ) -> anyhow::Result<ToolResult> {
-        let prompt = args
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .ok_or_else(|| anyhow::anyhow!("Missing 'prompt' parameter for parallel execution"))?;
+        let prompt = require_str!(args, "prompt").trim();
 
         if prompt.is_empty() {
             return Ok(ToolResult {
@@ -839,10 +828,7 @@ impl DelegateTool {
 
     /// Retrieve the result of a background delegate task by task_id.
     async fn handle_check_result(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-        let task_id = args
-            .get("task_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'task_id' parameter for check_result"))?;
+        let task_id = require_str!(args, "task_id");
 
         if let Err(e) = Self::validate_task_id(task_id) {
             return Ok(ToolResult {
@@ -923,10 +909,7 @@ impl DelegateTool {
 
     /// Cancel a running background task by task_id.
     async fn handle_cancel_task(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-        let task_id = args
-            .get("task_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'task_id' parameter for cancel_task"))?;
+        let task_id = require_str!(args, "task_id");
 
         if let Err(e) = Self::validate_task_id(task_id) {
             return Ok(ToolResult {
@@ -1489,15 +1472,17 @@ mod tests {
     #[tokio::test]
     async fn missing_agent_param() {
         let tool = DelegateTool::new(sample_agents(), None, test_security());
-        let result = tool.execute(json!({"prompt": "test"})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({"prompt": "test"})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]
     async fn missing_prompt_param() {
         let tool = DelegateTool::new(sample_agents(), None, test_security());
-        let result = tool.execute(json!({"agent": "researcher"})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({"agent": "researcher"})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]
@@ -2562,9 +2547,10 @@ mod tests {
 
         let tool = DelegateTool::new(sample_agents(), None, test_security())
             .with_workspace_dir(workspace.clone());
-        let result = tool.execute(json!({"action": "check_result"})).await;
+        let result = tool.execute(json!({"action": "check_result"})).await.unwrap();
 
-        assert!(result.is_err());
+        assert!(!result.success);
+        assert!(result.error.is_some());
 
         let _ = std::fs::remove_dir_all(workspace);
     }
@@ -2653,9 +2639,11 @@ mod tests {
             .execute(json!({
                 "parallel": ["researcher"]
             }))
-            .await;
+            .await
+            .unwrap();
 
-        assert!(result.is_err());
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

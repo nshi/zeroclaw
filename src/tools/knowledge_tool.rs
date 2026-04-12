@@ -4,6 +4,7 @@
 //! capture, search, relate, suggest, expert_find, lessons_extract, graph_stats.
 
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::memory::knowledge_graph::{KnowledgeGraph, NodeType, Relation};
 use async_trait::async_trait;
 use serde_json::json;
@@ -27,12 +28,19 @@ impl Tool for KnowledgeTool {
     }
 
     fn description(&self) -> &str {
-        "Manage a knowledge graph of architecture decisions, solution patterns, lessons learned, and experts. Actions: capture, search, relate, suggest, expert_find, lessons_extract, graph_stats."
+        "Manage a persistent knowledge graph of architecture decisions, solution patterns, lessons \
+         learned, and domain experts. Use 'capture' to add new nodes (decision/pattern/lesson/expert), \
+         'search' to find nodes by keyword, 'relate' to create edges between nodes, 'suggest' for \
+         recommendations based on context, 'expert_find' to locate relevant experts, \
+         'lessons_extract' to surface lessons from a project, and 'graph_stats' for overview metrics. \
+         Stored in workspace/knowledge/. Separate from the memory tool — knowledge is structured and \
+         graph-based; memory is key-value."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "action": {
                     "type": "string",
@@ -93,10 +101,7 @@ impl Tool for KnowledgeTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let action = args
-            .get("action")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'action' parameter"))?;
+        let action = require_str!(args, "action");
 
         match action {
             "capture" => self.handle_capture(&args),
@@ -117,18 +122,9 @@ impl Tool for KnowledgeTool {
 
 impl KnowledgeTool {
     fn handle_capture(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-        let node_type_str = args
-            .get("node_type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'node_type' for capture"))?;
-        let title = args
-            .get("title")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'title' for capture"))?;
-        let content = args
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'content' for capture"))?;
+        let node_type_str = require_str!(args, "node_type");
+        let title = require_str!(args, "title");
+        let content = require_str!(args, "content");
 
         let node_type = NodeType::parse(node_type_str).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -241,18 +237,9 @@ impl KnowledgeTool {
     }
 
     fn handle_relate(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-        let from_id = args
-            .get("from_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'from_id' for relate"))?;
-        let to_id = args
-            .get("to_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'to_id' for relate"))?;
-        let relation_str = args
-            .get("relation")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'relation' for relate"))?;
+        let from_id = require_str!(args, "from_id");
+        let to_id = require_str!(args, "to_id");
+        let relation_str = require_str!(args, "relation");
 
         let relation = Relation::parse(relation_str).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -275,7 +262,10 @@ impl KnowledgeTool {
             .get("query")
             .or_else(|| args.get("content"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'query' or 'content' for suggest"))?;
+            .filter(|v| !v.is_empty());
+        let Some(query) = query else {
+            return ToolResult::err("Missing required parameter 'query'");
+        };
 
         let results = self.graph.query_by_similarity(query, 10)?;
         let suggestions: Vec<serde_json::Value> = results
@@ -339,10 +329,7 @@ impl KnowledgeTool {
     }
 
     fn handle_lessons_extract(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-        let text = args
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'content' for lessons_extract"))?;
+        let text = require_str!(args, "content");
 
         // Simple keyword-based extraction: split on sentence boundaries, score by
         // signal keywords that commonly indicate lessons.

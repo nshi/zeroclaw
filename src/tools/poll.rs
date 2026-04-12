@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::channels::traits::{Channel, SendMessage};
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -117,6 +118,7 @@ impl Tool for PollTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "question": {
                     "type": "string",
@@ -164,13 +166,11 @@ impl Tool for PollTool {
         }
 
         // Parse required params
-        let question = args
-            .get("question")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'question' parameter"))?
-            .to_string();
+        let question = require_str!(args, "question").trim();
+        if question.is_empty() {
+            return ToolResult::err("Missing required parameter 'question'");
+        }
+        let question = question.to_string();
 
         let options = match validate_options(&args) {
             Ok(opts) => opts,

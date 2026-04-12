@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 
+use crate::require_str;
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
 use crate::tools::traits::{Tool, ToolResult};
@@ -38,14 +39,17 @@ impl Tool for VerifiableIntentTool {
     }
 
     fn description(&self) -> &str {
-        "Verify a Verifiable Intent credential chain. Supports two operations: \
-         'verify_binding' checks sd_hash binding between credential layers; \
-         'evaluate_constraints' validates constraints against fulfillment data."
+        "Verify Verifiable Intent (VI) credentials — cryptographic proofs that an action was \
+         authorized. Three operations: 'verify_binding' checks that sd_hash in a child credential \
+         matches the parent SD-JWT; 'evaluate_constraints' validates that fulfillment data satisfies \
+         the constraint rules in a credential; 'verify_timestamps' checks iat/exp validity. \
+         Use when processing VI-signed requests to confirm authorization before executing."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "operation": {
                     "type": "string",
@@ -109,14 +113,8 @@ impl Tool for VerifiableIntentTool {
 }
 
 fn execute_verify_binding(args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-    let sd_hash = args
-        .get("sd_hash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("missing 'sd_hash' parameter"))?;
-    let serialized_parent = args
-        .get("serialized_parent")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("missing 'serialized_parent' parameter"))?;
+    let sd_hash = require_str!(args, "sd_hash");
+    let serialized_parent = require_str!(args, "serialized_parent");
 
     match verify_sd_hash_binding(sd_hash, serialized_parent) {
         Ok(()) => Ok(ToolResult {
@@ -132,12 +130,12 @@ fn execute_evaluate_constraints(
     args: &serde_json::Value,
     strictness: StrictnessMode,
 ) -> anyhow::Result<ToolResult> {
-    let constraints_value = args
-        .get("constraints")
-        .ok_or_else(|| anyhow::anyhow!("missing 'constraints' parameter"))?;
-    let fulfillment_value = args
-        .get("fulfillment")
-        .ok_or_else(|| anyhow::anyhow!("missing 'fulfillment' parameter"))?;
+    let Some(constraints_value) = args.get("constraints") else {
+        return ToolResult::err("Missing required parameter 'constraints'");
+    };
+    let Some(fulfillment_value) = args.get("fulfillment") else {
+        return ToolResult::err("Missing required parameter 'fulfillment'");
+    };
 
     let constraints: Vec<Constraint> = serde_json::from_value(constraints_value.clone())?;
     let fulfillment: Fulfillment = serde_json::from_value(fulfillment_value.clone())?;
@@ -162,14 +160,12 @@ fn execute_evaluate_constraints(
 }
 
 fn execute_verify_timestamps(args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-    let iat = args
-        .get("iat")
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| anyhow::anyhow!("missing 'iat' parameter"))?;
-    let exp = args
-        .get("exp")
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| anyhow::anyhow!("missing 'exp' parameter"))?;
+    let Some(iat) = args.get("iat").and_then(|v| v.as_i64()) else {
+        return ToolResult::err("Missing required parameter 'iat'");
+    };
+    let Some(exp) = args.get("exp").and_then(|v| v.as_i64()) else {
+        return ToolResult::err("Missing required parameter 'exp'");
+    };
 
     match verify_timestamps(iat, exp) {
         Ok(()) => Ok(ToolResult {

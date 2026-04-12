@@ -31,6 +31,7 @@ impl Tool for SopListTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "filter": {
                     "type": "string",

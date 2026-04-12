@@ -3,6 +3,7 @@
 //! Provides `workspace` subcommands: list, switch, create, info, export.
 
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::config::workspace::WorkspaceManager;
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -37,6 +38,7 @@ impl Tool for WorkspaceTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "action": {
                     "type": "string",
@@ -53,10 +55,7 @@ impl Tool for WorkspaceTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let action = args
-            .get("action")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'action' parameter"))?;
+        let action = require_str!(args, "action");
 
         let name = args.get("name").and_then(|v| v.as_str());
 
@@ -102,9 +101,9 @@ impl Tool for WorkspaceTool {
                     });
                 }
 
-                let ws_name = name.ok_or_else(|| {
-                    anyhow::anyhow!("'name' parameter is required for switch action")
-                })?;
+                let Some(ws_name) = name else {
+                    return ToolResult::err("Missing required parameter 'name' for switch action");
+                };
 
                 let mut mgr = self.manager.write().await;
                 match mgr.switch(ws_name) {
@@ -138,9 +137,9 @@ impl Tool for WorkspaceTool {
                     });
                 }
 
-                let ws_name = name.ok_or_else(|| {
-                    anyhow::anyhow!("'name' parameter is required for create action")
-                })?;
+                let Some(ws_name) = name else {
+                    return ToolResult::err("Missing required parameter 'name' for create action");
+                };
 
                 let mut mgr = self.manager.write().await;
                 match mgr.create(ws_name).await {

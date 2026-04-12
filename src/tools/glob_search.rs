@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -32,6 +33,7 @@ impl Tool for GlobSearchTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "pattern": {
                     "type": "string",
@@ -43,10 +45,7 @@ impl Tool for GlobSearchTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let pattern = args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'pattern' parameter"))?;
+        let pattern = require_str!(args, "pattern");
 
         // Rate limit check (fast path)
         if self.security.is_rate_limited() {
@@ -282,8 +281,9 @@ mod tests {
     #[tokio::test]
     async fn glob_search_missing_param() {
         let tool = GlobSearchTool::new(test_security(std::env::temp_dir()));
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

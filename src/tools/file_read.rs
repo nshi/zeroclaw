@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -24,12 +25,16 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read file contents with line numbers. Supports partial reading via offset and limit. Extracts text from PDF; other binary files are read with lossy UTF-8 conversion."
+        "Read file contents with line numbers. Returns numbered lines for precise referencing. \
+         Use offset and limit for large files instead of reading everything. \
+         Extracts text from PDF files automatically; binary files use lossy UTF-8 conversion. \
+         Maximum file size: 10 MB."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -37,10 +42,12 @@ impl Tool for FileReadTool {
                 },
                 "offset": {
                     "type": "integer",
+                    "minimum": 1,
                     "description": "Starting line number (1-based, default: 1)"
                 },
                 "limit": {
                     "type": "integer",
+                    "minimum": 1,
                     "description": "Maximum number of lines to return (default: all)"
                 }
             },
@@ -49,10 +56,7 @@ impl Tool for FileReadTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
+        let path = require_str!(args, "path");
 
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
@@ -394,8 +398,9 @@ mod tests {
     #[tokio::test]
     async fn file_read_missing_path_param() {
         let tool = FileReadTool::new(test_security(std::env::temp_dir()));
-        let result = tool.execute(json!({})).await;
-        assert!(result.is_err());
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

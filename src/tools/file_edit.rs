@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -27,12 +28,16 @@ impl Tool for FileEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing an exact string match with new content"
+        "Edit a file by replacing an exact string match with new content. \
+         The old_string must appear exactly once in the file — if it matches zero or multiple times \
+         the edit fails. Read the file first to get the exact content to match. \
+         Use file_write instead when replacing the entire file."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
@@ -40,11 +45,12 @@ impl Tool for FileEditTool {
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "The exact text to find and replace (must appear exactly once in the file)"
+                    "minLength": 1,
+                    "description": "The exact text to find and replace. Must appear exactly once in the file (zero matches = not found error, multiple matches = ambiguous error)."
                 },
                 "new_string": {
                     "type": "string",
-                    "description": "The replacement text (empty string to delete the matched text)"
+                    "description": "The replacement text. Use an empty string to delete the matched text."
                 }
             },
             "required": ["path", "old_string", "new_string"]
@@ -53,20 +59,18 @@ impl Tool for FileEditTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         // ── 1. Extract parameters ──────────────────────────────────
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
+        let path = require_str!(args, "path");
 
-        let old_string = args
-            .get("old_string")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'old_string' parameter"))?;
+        let old_string = match args.get("old_string").and_then(|v| v.as_str()) {
+            Some(v) => v,
+            None => return ToolResult::err("Missing required parameter 'old_string'"),
+        };
 
-        let new_string = args
-            .get("new_string")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'new_string' parameter"))?;
+        let new_string = match args.get("new_string").and_then(|v| v.as_str()) {
+            // new_string is allowed to be empty (to delete matched text)
+            Some(v) => v,
+            None => return ToolResult::err("Missing required parameter 'new_string'"),
+        };
 
         if old_string.is_empty() {
             return Ok(ToolResult {
@@ -414,8 +418,10 @@ mod tests {
         let tool = FileEditTool::new(test_security(std::env::temp_dir()));
         let result = tool
             .execute(json!({"old_string": "a", "new_string": "b"}))
-            .await;
-        assert!(result.is_err());
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]
@@ -423,8 +429,10 @@ mod tests {
         let tool = FileEditTool::new(test_security(std::env::temp_dir()));
         let result = tool
             .execute(json!({"path": "f.txt", "new_string": "b"}))
-            .await;
-        assert!(result.is_err());
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]
@@ -432,8 +440,10 @@ mod tests {
         let tool = FileEditTool::new(test_security(std::env::temp_dir()));
         let result = tool
             .execute(json!({"path": "f.txt", "old_string": "a"}))
-            .await;
-        assert!(result.is_err());
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

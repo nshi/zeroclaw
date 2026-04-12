@@ -369,6 +369,7 @@ impl Tool for WeatherTool {
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "location": {
                     "type": "string",

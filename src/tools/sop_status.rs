@@ -49,6 +49,7 @@ impl Tool for SopStatusTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "run_id": {
                     "type": "string",

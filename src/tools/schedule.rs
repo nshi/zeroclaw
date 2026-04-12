@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::config::Config;
 use crate::cron;
 use crate::security::SecurityPolicy;
@@ -36,6 +37,7 @@ impl Tool for ScheduleTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "action": {
                     "type": "string",
@@ -73,18 +75,12 @@ impl Tool for ScheduleTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let action = args
-            .get("action")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'action' parameter"))?;
+        let action = require_str!(args, "action");
 
         match action {
             "list" => self.handle_list(),
             "get" => {
-                let id = args
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter for get action"))?;
+                let id = require_str!(args, "id");
                 self.handle_get(id)
             }
             "create" | "add" | "once" => {
@@ -98,30 +94,21 @@ impl Tool for ScheduleTool {
                 if let Some(blocked) = self.enforce_mutation_allowed(action) {
                     return Ok(blocked);
                 }
-                let id = args
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter for cancel action"))?;
+                let id = require_str!(args, "id");
                 Ok(self.handle_cancel(id))
             }
             "pause" => {
                 if let Some(blocked) = self.enforce_mutation_allowed(action) {
                     return Ok(blocked);
                 }
-                let id = args
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter for pause action"))?;
+                let id = require_str!(args, "id");
                 Ok(self.handle_pause_resume(id, true))
             }
             "resume" => {
                 if let Some(blocked) = self.enforce_mutation_allowed(action) {
                     return Ok(blocked);
                 }
-                let id = args
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter for resume action"))?;
+                let id = require_str!(args, "id");
                 Ok(self.handle_pause_resume(id, false))
             }
             other => Ok(ToolResult {
@@ -244,11 +231,10 @@ impl ScheduleTool {
         args: &serde_json::Value,
         approved: bool,
     ) -> Result<ToolResult> {
-        let command = args
-            .get("command")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing or empty 'command' parameter"))?;
+        let command = require_str!(args, "command");
+        if command.trim().is_empty() {
+            return ToolResult::err("Missing required parameter 'command'");
+        }
 
         let expression = args.get("expression").and_then(|value| value.as_str());
         let delay = args.get("delay").and_then(|value| value.as_str());

@@ -5,6 +5,7 @@ use serde_json::json;
 use tracing::warn;
 
 use super::traits::{Tool, ToolResult};
+use crate::require_str;
 use crate::sop::types::{SopRunAction, SopStepResult, SopStepStatus};
 use crate::sop::{SopAuditLogger, SopEngine, SopMetricsCollector};
 
@@ -48,6 +49,7 @@ impl Tool for SopAdvanceTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "run_id": {
                     "type": "string",
@@ -68,20 +70,11 @@ impl Tool for SopAdvanceTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let run_id = args
-            .get("run_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'run_id' parameter"))?;
+        let run_id = require_str!(args, "run_id");
 
-        let status_str = args
-            .get("status")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'status' parameter"))?;
+        let status_str = require_str!(args, "status");
 
-        let output = args
-            .get("output")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'output' parameter"))?;
+        let output = require_str!(args, "output");
 
         let step_status = match status_str {
             "completed" => SopStepStatus::Completed,
