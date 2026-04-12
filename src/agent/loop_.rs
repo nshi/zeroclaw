@@ -2330,6 +2330,8 @@ pub(crate) async fn run_tool_call_loop(
     );
 
     let mut tool_use_nudged = false;
+    let mut pre_nudge_display_text: Option<String> = None;
+    let mut pre_nudge_response_text: Option<String> = None;
 
     for iteration in 0..max_iterations {
         let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
@@ -2663,7 +2665,7 @@ pub(crate) async fn run_tool_call_loop(
         };
 
         let (
-            response_text,
+            mut response_text,
             parsed_text,
             tool_calls,
             assistant_history_content,
@@ -2855,7 +2857,7 @@ pub(crate) async fn run_tool_call_loop(
             }
         };
 
-        let display_text = if parsed_text.is_empty() {
+        let mut display_text = if parsed_text.is_empty() {
             response_text.clone()
         } else {
             parsed_text
@@ -2879,9 +2881,22 @@ pub(crate) async fn run_tool_call_loop(
             if let Some(nudge) = detect_missed_tool_use(&display_text, &tool_specs) {
                 tool_use_nudged = true;
                 tracing::info!("Nudging LLM to use tool instead of plain text");
+                pre_nudge_display_text = Some(display_text.clone());
+                pre_nudge_response_text = Some(response_text.clone());
                 history.push(ChatMessage::assistant(response_text.clone()));
                 history.push(ChatMessage::system(nudge));
                 continue;
+            }
+        }
+
+        // If the post-nudge iteration returned empty (LLM didn't comply),
+        // fall back to the original pre-nudge response so the user still
+        // sees the answer rather than nothing.
+        if tool_calls.is_empty() && display_text.trim().is_empty() {
+            if let Some(saved) = pre_nudge_display_text.take() {
+                tracing::info!("Post-nudge response empty; falling back to pre-nudge text");
+                display_text = saved;
+                response_text = pre_nudge_response_text.take().unwrap_or(display_text.clone());
             }
         }
 
