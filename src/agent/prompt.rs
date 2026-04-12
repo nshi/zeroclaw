@@ -28,14 +28,16 @@ pub const ANTI_NARRATION_TEXT: &str = "\
 pub const AUTONOMY_FULL_TEXT: &str = "\
 - Allowed tools/actions: execute directly, no extra approval needed.\n\
 - You have full access to all configured tools. Use them confidently.\n\
-- Blocked tools/actions: explain the concrete restriction. Never simulate an approval dialog.";
+- Blocked tools/actions: explain the concrete restriction. Never simulate an approval dialog.\n\
+- For genuinely ambiguous requests where multiple valid interpretations exist, use `ask_user` to clarify.";
 
 pub const AUTONOMY_READONLY_TEXT: &str = "\
 - This runtime is read-only. Write operations will be rejected.\n\
 - Use read-only tools freely and confidently.";
 
 pub const AUTONOMY_SUPERVISED_TEXT: &str = "\
-- Ask for approval when the runtime policy requires it for the specific action.\n\
+- When you need user input, confirmation, or approval: call the `ask_user` tool. Do NOT ask questions as plain text — the user cannot reply to text output.\n\
+- For urgent situations or problems you cannot resolve alone: call `escalate_to_human`.\n\
 - Do not preemptively refuse — attempt actions and let the runtime enforce restrictions.\n\
 - Use available tools confidently; the security policy will enforce boundaries.";
 
@@ -354,7 +356,8 @@ impl PromptSection for ToolsSection {
         }
         if has_tool_search {
             out.push_str(
-                "\n**Note:** More tools exist beyond those listed. Use **tool_search** with keywords to discover capabilities (HTTP, git, web search, notifications, image generation, etc.).\n",
+                "\n**Important:** The tools listed above are a subset. Before concluding that \
+you cannot perform an action, use **tool_search** with keywords to check for additional capabilities.\n",
             );
         }
         if !ctx.dispatcher_instructions.is_empty() {
@@ -503,6 +506,7 @@ impl PromptSection for TaskInstructionSection {
         if ctx.native_tools {
             Ok("## Your Task\n\n\
                 Respond naturally. Use tools when action is needed. Answer follow-ups from conversation context.\n\
+                When you think a capability might exist but aren't sure which tool to use, call `tool_search` with keywords to discover it.\n\
                 Do NOT: summarize this config, describe capabilities, or output meta-commentary."
                 .into())
         } else {
