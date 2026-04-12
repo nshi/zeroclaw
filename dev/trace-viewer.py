@@ -323,8 +323,11 @@ def _render_outbound(payload: dict) -> list[str]:
     return [f"  {c('Content:', 'bold')} {c(preview, 'blue')}"]
 
 
-def _render_llm_request(payload: dict) -> list[str]:
+def _render_llm_request(payload: dict, event: dict | None = None) -> list[str]:
     lines = []
+    model = (event or {}).get("model") or payload.get("model")
+    if model:
+        lines.append(f"  {c('Model:', 'bold')} {c(model, 'dim')}")
     lines.append(f"  {c('Iteration:', 'bold')} {payload.get('iteration', '?')}")
     lines.append(f"  {c('Messages:', 'bold')} {payload.get('messages_count', '?')}")
     prompt_arr = payload.get("prompt") or []
@@ -345,8 +348,11 @@ def _render_llm_request(payload: dict) -> list[str]:
     return lines
 
 
-def _render_llm_response(payload: dict) -> list[str]:
+def _render_llm_response(payload: dict, event: dict | None = None) -> list[str]:
     lines = []
+    model = (event or {}).get("model") or payload.get("model")
+    if model:
+        lines.append(f"  {c('Model:', 'bold')} {c(model, 'dim')}")
     lines.append(f"  {c('Iteration:', 'bold')} {payload.get('iteration', '?')}")
     dur = payload.get("duration_ms")
     if dur is not None:
@@ -468,10 +474,12 @@ def format_turn(index: int, total: int, event: dict) -> str:
     else:
         etype_colored = etype
 
-    header = c(f"── Turn {index}/{total} ── ", "cyan") + etype_colored + c(f" ── {ts} ──", "cyan")
+    event_id = event.get("id", "")
+    id_suffix = f" ── {c(event_id, 'dim')}" if event_id else ""
+    header = c(f"── Turn {index}/{total} ── ", "cyan") + etype_colored + c(f" ── {ts} ──", "cyan") + id_suffix
     payload = event.get("payload") or {}
     renderer = _RENDERERS.get(etype, _render_generic)
-    if etype == "tool_call_result":
+    if etype in ("tool_call_result", "llm_request", "llm_response"):
         body_lines = renderer(payload, event=event)
     else:
         body_lines = renderer(payload)
@@ -482,12 +490,40 @@ def format_turn(index: int, total: int, event: dict) -> str:
 # Interactive stepper
 # ---------------------------------------------------------------------------
 
+def _find_system_prompt(session: Session) -> str | None:
+    """Return the system prompt from the first llm_request in the session, if any."""
+    for ev in session.events:
+        if ev.get("event_type") != "llm_request":
+            continue
+        prompt_arr = (ev.get("payload") or {}).get("prompt") or []
+        if not prompt_arr:
+            continue
+        first = prompt_arr[0]
+        if isinstance(first, dict) and first.get("role") == "system":
+            return str(first.get("content", ""))
+    return None
+
+
+def _display_system_prompt(session: Session) -> None:
+    text = _find_system_prompt(session)
+    if text is None:
+        print(c("  (no system prompt found in this session)", "dim"))
+        return
+    print()
+    print(c("── System Prompt ──", "cyan", "bold"))
+    for line in text.split("\n"):
+        print(f"  {c(line, 'dim')}")
+    print(c("── End System Prompt ──", "cyan", "bold"))
+
+
 def stepper(session: Session, dump: bool = False) -> None:
     events = session.events
     total = len(events)
     if total == 0:
         print("  (no events in this session)")
         return
+
+    has_system_prompt = _find_system_prompt(session) is not None
 
     if dump:
         for i, ev in enumerate(events, 1):
@@ -501,10 +537,15 @@ def stepper(session: Session, dump: bool = False) -> None:
         print(format_turn(idx + 1, total, events[idx]))
         print()
 
-        if idx >= total - 1:
-            prompt_text = c("[q=quit, p=prev, #=jump] ", "dim")
-        else:
-            prompt_text = c("[Enter/n=next, p=prev, q=quit, #=jump] ", "dim")
+        parts = []
+        if idx < total - 1:
+            parts.append("Enter/n=next")
+        parts.append("p=prev")
+        parts.append("q=quit")
+        parts.append("#=jump")
+        if has_system_prompt:
+            parts.append("s=system prompt")
+        prompt_text = c(f"[{', '.join(parts)}] ", "dim")
 
         try:
             raw = input(prompt_text).strip().lower()
@@ -519,6 +560,8 @@ def stepper(session: Session, dump: bool = False) -> None:
         elif raw == "p":
             if idx > 0:
                 idx -= 1
+        elif raw == "s" and has_system_prompt:
+            _display_system_prompt(session)
         else:
             try:
                 jump = int(raw)
