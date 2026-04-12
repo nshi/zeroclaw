@@ -7,7 +7,7 @@
 //! to provider construction, verifying factory resolution, URL construction,
 //! credential wiring, and auth header format.
 
-use zeroclaw::providers::{create_provider, create_provider_with_url};
+use mentat::providers::{create_provider, create_provider_with_url};
 
 /// Helper: assert provider creation succeeds
 fn assert_provider_ok(name: &str, key: Option<&str>, url: Option<&str>) {

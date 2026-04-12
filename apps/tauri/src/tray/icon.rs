@@ -26,12 +26,12 @@ pub fn icon_for_state(connected: bool, status: AgentStatus) -> Image<'static> {
 /// Tooltip text for the current state.
 pub fn tooltip_for_state(connected: bool, status: AgentStatus) -> &'static str {
     if !connected {
-        return "ZeroClaw — Disconnected";
+        return "Mentat — Disconnected";
     }
     match status {
-        AgentStatus::Idle => "ZeroClaw — Idle",
-        AgentStatus::Working => "ZeroClaw — Working",
-        AgentStatus::Error => "ZeroClaw — Error",
+        AgentStatus::Idle => "Mentat — Idle",
+        AgentStatus::Working => "Mentat — Working",
+        AgentStatus::Error => "Mentat — Error",
     }
 }
 
@@ -58,16 +58,16 @@ mod tests {
     fn tooltip_disconnected() {
         assert_eq!(
             tooltip_for_state(false, AgentStatus::Idle),
-            "ZeroClaw — Disconnected"
+            "Mentat — Disconnected"
         );
         // Agent status is irrelevant when disconnected.
         assert_eq!(
             tooltip_for_state(false, AgentStatus::Working),
-            "ZeroClaw — Disconnected"
+            "Mentat — Disconnected"
         );
         assert_eq!(
             tooltip_for_state(false, AgentStatus::Error),
-            "ZeroClaw — Disconnected"
+            "Mentat — Disconnected"
         );
     }
 
@@ -75,15 +75,15 @@ mod tests {
     fn tooltip_connected_variants() {
         assert_eq!(
             tooltip_for_state(true, AgentStatus::Idle),
-            "ZeroClaw — Idle"
+            "Mentat — Idle"
         );
         assert_eq!(
             tooltip_for_state(true, AgentStatus::Working),
-            "ZeroClaw — Working"
+            "Mentat — Working"
         );
         assert_eq!(
             tooltip_for_state(true, AgentStatus::Error),
-            "ZeroClaw — Error"
+            "Mentat — Error"
         );
     }
 

@@ -1,0 +1,16 @@
+version: "3.8"
+services:
+  mentat:
+    image: ghcr.io/nshi/mentat:0.6.4
+    restart: unless-stopped
+    environment:
+      - API_KEY=${API_KEY}
+      - PROVIDER=${PROVIDER:-openrouter}
+      - MENTAT_ALLOW_PUBLIC_BIND=true
+      - MENTAT_GATEWAY_PORT=42617
+    volumes:
+      - mentat-data:/mentat-data
+    expose:
+      - 42617
+volumes:
+  mentat-data: {}

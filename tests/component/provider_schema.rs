@@ -7,7 +7,7 @@
 //! for each provider's API specification. Validates ChatMessage, ChatResponse,
 //! ToolCall, and AuthStyle serialization contracts.
 
-use zeroclaw::providers::traits::{ChatMessage, ChatResponse, ToolCall};
+use mentat::providers::traits::{ChatMessage, ChatResponse, ToolCall};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ChatMessage serialization

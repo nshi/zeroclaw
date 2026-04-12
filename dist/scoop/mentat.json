@@ -1,0 +1,27 @@
+{
+    "version": "0.5.9",
+    "description": "Zero overhead. Zero compromise. 100% Rust. The fastest, smallest AI assistant.",
+    "homepage": "https://github.com/nshi/mentat",
+    "license": "MIT|Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/nshi/mentat/releases/download/v0.5.9/mentat-x86_64-pc-windows-msvc.zip",
+            "hash": "",
+            "bin": "mentat.exe"
+        }
+    },
+    "checkver": {
+        "github": "https://github.com/nshi/mentat"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/nshi/mentat/releases/download/v$version/mentat-x86_64-pc-windows-msvc.zip"
+            }
+        },
+        "hash": {
+            "url": "https://github.com/nshi/mentat/releases/download/v$version/SHA256SUMS",
+            "regex": "([a-f0-9]{64})\\s+mentat-x86_64-pc-windows-msvc\\.zip"
+        }
+    }
+}

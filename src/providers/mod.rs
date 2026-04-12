@@ -40,7 +40,7 @@ const MAX_API_ERROR_CHARS: usize = 500;
 pub struct ProviderRuntimeOptions {
     pub auth_profile_override: Option<String>,
     pub provider_api_url: Option<String>,
-    pub zeroclaw_dir: Option<PathBuf>,
+    pub mentat_dir: Option<PathBuf>,
     pub secrets_encrypt: bool,
     pub reasoning_enabled: Option<bool>,
     pub reasoning_effort: Option<String>,
@@ -48,7 +48,7 @@ pub struct ProviderRuntimeOptions {
     /// `None` uses the provider's built-in default (120s for compatible providers).
     pub provider_timeout_secs: Option<u64>,
     /// Extra HTTP headers to include in provider API requests.
-    /// These are merged from the config file and `ZEROCLAW_EXTRA_HEADERS` env var.
+    /// These are merged from the config file and `MENTAT_EXTRA_HEADERS` env var.
     pub extra_headers: std::collections::HashMap<String, String>,
     /// Custom API path suffix for OpenAI-compatible providers
     /// (e.g. "/v2/generate" instead of the default "/chat/completions").
@@ -63,7 +63,7 @@ impl Default for ProviderRuntimeOptions {
         Self {
             auth_profile_override: None,
             provider_api_url: None,
-            zeroclaw_dir: None,
+            mentat_dir: None,
             secrets_encrypt: true,
             reasoning_enabled: None,
             reasoning_effort: None,
@@ -81,7 +81,7 @@ pub fn provider_runtime_options_from_config(
     ProviderRuntimeOptions {
         auth_profile_override: None,
         provider_api_url: config.api_url.clone(),
-        zeroclaw_dir: config.config_path.parent().map(PathBuf::from),
+        mentat_dir: config.config_path.parent().map(PathBuf::from),
         secrets_encrypt: config.secrets.encrypt,
         reasoning_enabled: config.runtime.reasoning_enabled,
         reasoning_effort: config.runtime.reasoning_effort.clone(),
@@ -181,7 +181,7 @@ pub async fn api_error(provider: &str, response: reqwest::Response) -> anyhow::E
 /// Resolution order:
 /// 1. Explicitly provided `api_key` parameter (trimmed, filtered if empty)
 /// 2. Provider-specific environment variable (e.g., `ANTHROPIC_OAUTH_TOKEN`, `OPENROUTER_API_KEY`)
-/// 3. Generic fallback variables (`ZEROCLAW_API_KEY`, `API_KEY`)
+/// 3. Generic fallback variables (`MENTAT_API_KEY`, `API_KEY`)
 fn resolve_provider_credential(name: &str, credential_override: Option<&str>) -> Option<String> {
     if let Some(raw_override) = credential_override {
         let trimmed_override = raw_override.trim();
@@ -223,7 +223,7 @@ fn resolve_provider_credential(name: &str, credential_override: Option<&str>) ->
         }
     }
 
-    for env_var in ["ZEROCLAW_API_KEY", "API_KEY"] {
+    for env_var in ["MENTAT_API_KEY", "API_KEY"] {
         if let Ok(value) = std::env::var(env_var) {
             let value = value.trim();
             if !value.is_empty() {
@@ -360,10 +360,10 @@ fn create_provider_with_url_and_options(
             Ok(Box::new(p))
         }
         "gemini" | "google" | "google-gemini" => {
-            let state_dir = options.zeroclaw_dir.clone().unwrap_or_else(|| {
+            let state_dir = options.mentat_dir.clone().unwrap_or_else(|| {
                 directories::UserDirs::new().map_or_else(
-                    || PathBuf::from(".zeroclaw"),
-                    |dirs| dirs.home_dir().join(".zeroclaw"),
+                    || PathBuf::from(".mentat"),
+                    |dirs| dirs.home_dir().join(".mentat"),
                 )
             });
             let auth_service = AuthService::new(&state_dir, options.secrets_encrypt);
@@ -586,7 +586,7 @@ pub struct ProviderInfo {
     pub local: bool,
 }
 
-/// Return the list of all known providers for display in `zeroclaw providers list`.
+/// Return the list of all known providers for display in `mentat providers list`.
 pub fn list_providers() -> Vec<ProviderInfo> {
     vec![
         ProviderInfo {
@@ -1055,12 +1055,12 @@ mod tests {
     #[test]
     fn provider_runtime_options_extra_headers_passed_through() {
         let mut extra_headers = std::collections::HashMap::new();
-        extra_headers.insert("X-Title".to_string(), "zeroclaw".to_string());
+        extra_headers.insert("X-Title".to_string(), "mentat".to_string());
         let options = ProviderRuntimeOptions {
             extra_headers,
             ..ProviderRuntimeOptions::default()
         };
         assert_eq!(options.extra_headers.len(), 1);
-        assert_eq!(options.extra_headers.get("X-Title").unwrap(), "zeroclaw");
+        assert_eq!(options.extra_headers.get("X-Title").unwrap(), "mentat");
     }
 }

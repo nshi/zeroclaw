@@ -6,7 +6,7 @@
 #[test]
 fn gateway_body_limit_is_reasonable() {
     assert_eq!(
-        zeroclaw::gateway::MAX_BODY_SIZE,
+        mentat::gateway::MAX_BODY_SIZE,
         65_536,
         "Max body size should be 64KB"
     );
@@ -16,7 +16,7 @@ fn gateway_body_limit_is_reasonable() {
 #[test]
 fn gateway_timeout_is_reasonable() {
     assert_eq!(
-        zeroclaw::gateway::REQUEST_TIMEOUT_SECS,
+        mentat::gateway::REQUEST_TIMEOUT_SECS,
         30,
         "Request timeout should be 30 seconds"
     );
@@ -26,7 +26,7 @@ fn gateway_timeout_is_reasonable() {
 #[test]
 fn gateway_rate_limit_window_is_60s() {
     assert_eq!(
-        zeroclaw::gateway::RATE_LIMIT_WINDOW_SECS,
+        mentat::gateway::RATE_LIMIT_WINDOW_SECS,
         60,
         "Rate limit window should be 60 seconds"
     );

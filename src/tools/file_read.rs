@@ -293,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_existing_file() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read");
+        let dir = std::env::temp_dir().join("mentat_test_file_read");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(dir.join("test.txt"), "hello world")
@@ -312,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_nonexistent_file() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_missing");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_missing");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
 
@@ -326,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_blocks_path_traversal() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_traversal");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_traversal");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
 
@@ -351,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_blocks_when_rate_limited() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_rate_limited");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_rate_limited");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(dir.join("test.txt"), "hello world")
@@ -379,7 +379,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_allows_readonly_mode() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_readonly");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_readonly");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(dir.join("test.txt"), "readonly ok")
@@ -405,7 +405,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_empty_file() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_empty");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_empty");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(dir.join("empty.txt"), "").await.unwrap();
@@ -420,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_nested_path() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_nested");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_nested");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(dir.join("sub/dir"))
             .await
@@ -445,7 +445,7 @@ mod tests {
     async fn file_read_blocks_symlink_escape() {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join("zeroclaw_test_file_read_symlink_escape");
+        let root = std::env::temp_dir().join("mentat_test_file_read_symlink_escape");
         let workspace = root.join("workspace");
         let outside = root.join("outside");
 
@@ -476,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_outside_workspace_allowed_when_workspace_only_disabled() {
-        let root = std::env::temp_dir().join("zeroclaw_test_file_read_allowed_roots_hint");
+        let root = std::env::temp_dir().join("mentat_test_file_read_allowed_roots_hint");
         let workspace = root.join("workspace");
         let outside = root.join("outside");
         let outside_file = outside.join("notes.txt");
@@ -509,7 +509,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_nonexistent_consumes_rate_limit_budget() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_probe");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_probe");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
 
@@ -543,7 +543,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_with_offset_and_limit() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_offset");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_offset");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(dir.join("lines.txt"), "aaa\nbbb\nccc\nddd\neee")
@@ -597,7 +597,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_offset_beyond_end() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_offset_end");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_offset_end");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(dir.join("short.txt"), "one\ntwo")
@@ -621,7 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_rejects_oversized_file() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_large");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_large");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
 
@@ -640,7 +640,7 @@ mod tests {
     /// PDF files should be readable via pdf-extract text extraction.
     #[tokio::test]
     async fn file_read_extracts_pdf_text() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_pdf");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_pdf");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
 
@@ -670,7 +670,7 @@ mod tests {
     /// Non-UTF-8 binary files should be read with lossy conversion.
     #[tokio::test]
     async fn file_read_lossy_reads_binary_file() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_lossy");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_lossy");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
 
@@ -790,7 +790,7 @@ mod tests {
         use e2e_helpers::*;
 
         // ── Set up workspace with PDF fixture ──
-        let workspace = std::env::temp_dir().join("zeroclaw_test_e2e_file_read_pdf");
+        let workspace = std::env::temp_dir().join("mentat_test_e2e_file_read_pdf");
         let _ = tokio::fs::remove_dir_all(&workspace).await;
         tokio::fs::create_dir_all(&workspace).await.unwrap();
 
@@ -889,7 +889,7 @@ mod tests {
         use e2e_helpers::*;
 
         // ── Set up workspace with binary file ──
-        let workspace = std::env::temp_dir().join("zeroclaw_test_e2e_file_read_lossy");
+        let workspace = std::env::temp_dir().join("mentat_test_e2e_file_read_lossy");
         let _ = tokio::fs::remove_dir_all(&workspace).await;
         tokio::fs::create_dir_all(&workspace).await.unwrap();
 
@@ -974,7 +974,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_blocks_null_byte_in_path() {
-        let dir = std::env::temp_dir().join("zeroclaw_test_file_read_null_byte");
+        let dir = std::env::temp_dir().join("mentat_test_file_read_null_byte");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
 
@@ -991,7 +991,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_allowed_root_with_workspace_only() {
-        let root = std::env::temp_dir().join("zeroclaw_test_file_read_allowed_root");
+        let root = std::env::temp_dir().join("mentat_test_file_read_allowed_root");
         let workspace = root.join("workspace");
         let allowed = root.join("allowed_dir");
 

@@ -93,10 +93,10 @@ and WebSocket connections. Bind address defaults to the values in \
 your config file (gateway.host / gateway.port).
 
 Examples:
-  zeroclaw gateway start              # use config defaults
-  zeroclaw gateway start -p 8080      # listen on port 8080
-  zeroclaw gateway start --host 0.0.0.0   # requires [gateway].allow_public_bind=true or a tunnel
-  zeroclaw gateway start -p 0         # random available port")]
+  mentat gateway start              # use config defaults
+  mentat gateway start -p 8080      # listen on port 8080
+  mentat gateway start --host 0.0.0.0   # requires [gateway].allow_public_bind=true or a tunnel
+  mentat gateway start -p 0         # random available port")]
     Start {
         /// Port to listen on (use 0 for random available port); defaults to config gateway.port
         #[arg(short, long)]
@@ -115,8 +115,8 @@ Stops the running gateway if present, then starts a new instance \
 with the current configuration.
 
 Examples:
-  zeroclaw gateway restart            # restart with config defaults
-  zeroclaw gateway restart -p 8080    # restart on port 8080")]
+  mentat gateway restart            # restart with config defaults
+  mentat gateway restart -p 8080    # restart on port 8080")]
     Restart {
         /// Port to listen on (use 0 for random available port); defaults to config gateway.port
         #[arg(short, long)]
@@ -138,8 +138,8 @@ With --new, generates a fresh pairing code even if the gateway \
 was previously paired (useful for adding additional clients).
 
 Examples:
-  zeroclaw gateway get-paircode       # show current pairing code
-  zeroclaw gateway get-paircode --new # generate a new pairing code")]
+  mentat gateway get-paircode       # show current pairing code
+  mentat gateway get-paircode --new # generate a new pairing code")]
     GetPaircode {
         /// Generate a new pairing code (even if already paired)
         #[arg(long)]
@@ -192,8 +192,8 @@ configuration keys for that channel type.
 Supported types: telegram, discord, slack, whatsapp, matrix, imessage, email.
 
 Examples:
-  zeroclaw channel add telegram '{\"bot_token\":\"...\",\"name\":\"my-bot\"}'
-  zeroclaw channel add discord '{\"bot_token\":\"...\",\"name\":\"my-discord\"}'")]
+  mentat channel add telegram '{\"bot_token\":\"...\",\"name\":\"my-bot\"}'
+  mentat channel add discord '{\"bot_token\":\"...\",\"name\":\"my-discord\"}'")]
     Add {
         /// Channel type (telegram, discord, slack, whatsapp, matrix, imessage, email)
         channel_type: String,
@@ -214,8 +214,8 @@ ID to the channel allowlist so the agent will respond to messages \
 from that identity.
 
 Examples:
-  zeroclaw channel bind-telegram zeroclaw_user
-  zeroclaw channel bind-telegram 123456789")]
+  mentat channel bind-telegram mentat_user
+  mentat channel bind-telegram 123456789")]
     BindTelegram {
         /// Telegram identity to allow (username without '@' or numeric user ID)
         identity: String,
@@ -233,8 +233,8 @@ The --channel-id selects the channel by its config section name \
 platform-specific destination (e.g. a Telegram chat ID).
 
 Examples:
-  zeroclaw channel send 'Someone is near your device.' --channel-id telegram --recipient 123456789
-  zeroclaw channel send 'Build succeeded!' --channel-id discord --recipient 987654321")]
+  mentat channel send 'Someone is near your device.' --channel-id telegram --recipient 123456789
+  mentat channel send 'Build succeeded!' --channel-id discord --recipient 987654321")]
     Send {
         /// Message text to send
         message: String,
@@ -280,7 +280,7 @@ pub enum SkillCommands {
 /// Migration subcommands
 #[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MigrateCommands {
-    /// Import memory from an `OpenClaw` workspace into this `ZeroClaw` workspace
+    /// Import memory from an `OpenClaw` workspace into this `Mentat` workspace
     Openclaw {
         /// Optional path to `OpenClaw` workspace (defaults to ~/.openclaw/workspace)
         #[arg(long)]
@@ -306,9 +306,9 @@ Times are evaluated in UTC by default; use --tz with an IANA \
 timezone name to override.
 
 Examples:
-  zeroclaw cron add '0 9 * * 1-5' 'Good morning' --tz America/New_York --agent
-  zeroclaw cron add '*/30 * * * *' 'Check system health' --agent
-  zeroclaw cron add '*/5 * * * *' 'echo ok'")]
+  mentat cron add '0 9 * * 1-5' 'Good morning' --tz America/New_York --agent
+  mentat cron add '*/30 * * * *' 'Check system health' --agent
+  mentat cron add '*/5 * * * *' 'echo ok'")]
     Add {
         /// Cron expression
         expression: String,
@@ -331,8 +331,8 @@ Add a one-shot task that fires at a specific UTC timestamp.
 The timestamp must be in RFC 3339 format (e.g. 2025-01-15T14:00:00Z).
 
 Examples:
-  zeroclaw cron add-at 2025-01-15T14:00:00Z 'Send reminder'
-  zeroclaw cron add-at 2025-12-31T23:59:00Z 'Happy New Year!'")]
+  mentat cron add-at 2025-01-15T14:00:00Z 'Send reminder'
+  mentat cron add-at 2025-12-31T23:59:00Z 'Happy New Year!'")]
     AddAt {
         /// One-shot timestamp in RFC3339 format
         at: String,
@@ -352,8 +352,8 @@ Add a task that repeats at a fixed interval.
 Interval is specified in milliseconds. For example, 60000 = 1 minute.
 
 Examples:
-  zeroclaw cron add-every 60000 'Ping heartbeat'     # every minute
-  zeroclaw cron add-every 3600000 'Hourly report'    # every hour")]
+  mentat cron add-every 60000 'Ping heartbeat'     # every minute
+  mentat cron add-every 3600000 'Hourly report'    # every hour")]
     AddEvery {
         /// Interval in milliseconds
         every_ms: u64,
@@ -374,9 +374,9 @@ Accepts human-readable durations: s (seconds), m (minutes), \
 h (hours), d (days).
 
 Examples:
-  zeroclaw cron once 30m 'Run backup in 30 minutes'
-  zeroclaw cron once 2h 'Follow up on deployment'
-  zeroclaw cron once 1d 'Daily check'")]
+  mentat cron once 30m 'Run backup in 30 minutes'
+  mentat cron once 2h 'Follow up on deployment'
+  mentat cron once 1d 'Daily check'")]
     Once {
         /// Delay duration
         delay: String,
@@ -401,9 +401,9 @@ Update one or more fields of an existing scheduled task.
 Only the fields you specify are changed; others remain unchanged.
 
 Examples:
-  zeroclaw cron update <task-id> --expression '0 8 * * *'
-  zeroclaw cron update <task-id> --tz Europe/London --name 'Morning check'
-  zeroclaw cron update <task-id> --command 'Updated message'")]
+  mentat cron update <task-id> --expression '0 8 * * *'
+  mentat cron update <task-id> --tz Europe/London --name 'Morning check'
+  mentat cron update <task-id> --command 'Updated message'")]
     Update {
         /// Task ID
         id: String,

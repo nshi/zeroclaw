@@ -1,5 +1,5 @@
-# ZeroClaw Robot Kit Configuration
-# Copy to ~/.zeroclaw/robot.toml
+# Mentat Robot Kit Configuration
+# Copy to ~/.mentat/robot.toml
 
 # =============================================================================
 # DRIVE SYSTEM

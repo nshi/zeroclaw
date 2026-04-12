@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ZeroClaw runtime trace log viewer.
+"""Mentat runtime trace log viewer.
 
 Searches, browses, and steps through JSONL runtime trace events grouped
 by turn_id into sessions.  Designed for fast tail-reading of large files.
@@ -578,7 +578,7 @@ def validate_file(path: str) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Browse and search ZeroClaw runtime trace logs.",
+        description="Browse and search Mentat runtime trace logs.",
     )
     p.add_argument(
         "search_term",

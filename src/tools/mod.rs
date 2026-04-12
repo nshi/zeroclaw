@@ -382,7 +382,7 @@ pub fn all_tools_with_runtime(
         let llm_task_runtime_options = crate::providers::ProviderRuntimeOptions {
             auth_profile_override: None,
             provider_api_url: root_config.api_url.clone(),
-            zeroclaw_dir: root_config
+            mentat_dir: root_config
                 .config_path
                 .parent()
                 .map(std::path::PathBuf::from),
@@ -597,7 +597,7 @@ pub fn all_tools_with_runtime(
     let provider_runtime_options = crate::providers::ProviderRuntimeOptions {
         auth_profile_override: None,
         provider_api_url: root_config.api_url.clone(),
-        zeroclaw_dir: root_config
+        mentat_dir: root_config
             .config_path
             .parent()
             .map(std::path::PathBuf::from),

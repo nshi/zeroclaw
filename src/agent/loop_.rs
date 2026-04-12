@@ -1022,7 +1022,7 @@ fn parse_perl_style_tool_calls(response: &str) -> Vec<ParsedToolCall> {
 /// ```text
 /// <FunctionCall>
 /// file_read
-/// <code>path>/Users/kylelampa/Documents/zeroclaw/README.md</code>
+/// <code>path>/Users/kylelampa/Documents/mentat/README.md</code>
 /// </FunctionCall>
 /// ```
 fn parse_function_call_tool_calls(response: &str) -> Vec<ParsedToolCall> {
@@ -1070,7 +1070,7 @@ fn parse_function_call_tool_calls(response: &str) -> Vec<ParsedToolCall> {
 }
 
 /// Parse GLM-style tool calls from response text.
-/// Map tool name aliases from various LLM providers to ZeroClaw tool names.
+/// Map tool name aliases from various LLM providers to Mentat tool names.
 /// This handles variations like "fileread" -> "file_read", "bash" -> "shell", etc.
 fn map_tool_name_alias(tool_name: &str) -> &str {
     match tool_name {
@@ -1168,7 +1168,7 @@ fn parse_glm_style_tool_calls(text: &str) -> Vec<(String, serde_json::Value, Opt
 ///
 /// When a model emits a shortened call like `shell>uname -a` (without an
 /// explicit `/param_name`), we need to infer which parameter the value maps
-/// to. This function encodes the mapping for known ZeroClaw tools.
+/// to. This function encodes the mapping for known Mentat tools.
 fn default_param_for_tool(tool: &str) -> &'static str {
     match tool {
         "shell" | "bash" | "sh" | "exec" | "command" | "cmd" => "command",
@@ -1750,7 +1750,7 @@ fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
     // (e.g., in emails, files, or web pages) could include JSON that mimics a
     // tool call. Tool calls MUST be explicitly wrapped in either:
     // 1. OpenAI-style JSON with a "tool_calls" array
-    // 2. ZeroClaw tool-call tags (<tool_call>, <toolcall>, <tool-call>)
+    // 2. Mentat tool-call tags (<tool_call>, <toolcall>, <tool-call>)
     // 3. Markdown code blocks with tool_call/toolcall/tool-call language
     // 4. Explicit GLM line-based call formats (e.g. `shell/command>...`)
     // This ensures only the LLM's intentional tool calls are executed.
@@ -3867,7 +3867,7 @@ pub async fn run(
         println!("{response}");
         observer.record_event(&ObserverEvent::TurnComplete);
     } else {
-        println!("🦀 ZeroClaw Interactive Mode");
+        println!("🦀 Mentat Interactive Mode");
         println!("Type /help for commands.\n");
         let cli = crate::channels::CliChannel::new();
 

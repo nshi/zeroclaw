@@ -23,8 +23,8 @@ Options:
   -h, --help              Show this help
 
 Examples:
-  ./$SCRIPT_NAME --repo zeroclaw-labs/zeroclaw --limit 50
-  ./$SCRIPT_NAME --repo zeroclaw-labs/zeroclaw --kind prs --state open --apply
+  ./$SCRIPT_NAME --repo nshi/mentat --limit 50
+  ./$SCRIPT_NAME --repo nshi/mentat --kind prs --state open --apply
 USAGE
 }
 

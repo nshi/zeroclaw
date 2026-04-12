@@ -1,7 +1,7 @@
-//! WASM plugin system for ZeroClaw.
+//! WASM plugin system for Mentat.
 //!
 //! Plugins are WebAssembly modules loaded via Extism that can extend
-//! ZeroClaw with custom tools and channels. Enable with `--features plugins-wasm`.
+//! Mentat with custom tools and channels. Enable with `--features plugins-wasm`.
 
 pub mod error;
 pub mod host;

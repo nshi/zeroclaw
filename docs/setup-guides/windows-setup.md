@@ -1,6 +1,6 @@
 # Windows Setup Guide
 
-This guide covers building and installing ZeroClaw on Windows.
+This guide covers building and installing Mentat on Windows.
 
 ## Quick Start
 
@@ -25,8 +25,8 @@ You can also pass flags to skip the interactive menu:
 ### Option B: Scoop (package manager)
 
 ```powershell
-scoop bucket add zeroclaw https://github.com/zeroclaw-labs/scoop-zeroclaw
-scoop install zeroclaw
+scoop bucket add mentat https://github.com/nshi/scoop-mentat
+scoop install mentat
 ```
 
 ### Option C: Manual build
@@ -34,7 +34,7 @@ scoop install zeroclaw
 ```cmd
 rustup target add x86_64-pc-windows-msvc
 cargo build --release --locked --features channel-matrix,channel-lark --target x86_64-pc-windows-msvc
-copy target\x86_64-pc-windows-msvc\release\zeroclaw.exe %USERPROFILE%\.zeroclaw\bin\
+copy target\x86_64-pc-windows-msvc\release\mentat.exe %USERPROFILE%\.mentat\bin\
 ```
 
 ## Prerequisites
@@ -58,7 +58,7 @@ Alternatively, if you have Visual Studio 2019+ installed with the C++ workload, 
 
 ## Feature Flags
 
-ZeroClaw uses Cargo feature flags to control which integrations are compiled in:
+Mentat uses Cargo feature flags to control which integrations are compiled in:
 
 | Feature | Description | Default? |
 |---------|-------------|----------|
@@ -81,11 +81,11 @@ cargo build --release --locked --features channel-matrix,channel-lark --target x
 ## Post-Installation
 
 1. **Restart your terminal** for PATH changes to take effect
-2. **Initialize ZeroClaw:**
+2. **Initialize Mentat:**
    ```cmd
-   zeroclaw init
+   mentat init
    ```
-3. **Configure your API key** in `%USERPROFILE%\.zeroclaw\config.toml`
+3. **Configure your API key** in `%USERPROFILE%\.mentat\config.toml`
 
 ## Troubleshooting
 

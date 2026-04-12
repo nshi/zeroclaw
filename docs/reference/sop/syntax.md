@@ -64,7 +64,7 @@ Parser behavior:
 
 | Type | Fields | Notes |
 |---|---|---|
-| `manual` | none | Triggered by tool `sop_execute` (not a `zeroclaw sop run` CLI command). |
+| `manual` | none | Triggered by tool `sop_execute` (not a `mentat sop run` CLI command). |
 | `webhook` | `path` | Exact match against request path (`/sop/...` or `/webhook`). |
 | `mqtt` | `topic`, optional `condition` | MQTT topic supports `+` and `#` wildcards. |
 | `cron` | `expression` | Supports 5, 6, or 7 fields (5-field gets seconds prepended internally). |
@@ -82,8 +82,8 @@ Parser behavior:
 Use:
 
 ```bash
-zeroclaw sop validate
-zeroclaw sop validate <name>
+mentat sop validate
+mentat sop validate <name>
 ```
 
 Validation warns on empty names/descriptions, missing triggers, missing steps, and step numbering gaps.

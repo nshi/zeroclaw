@@ -1,6 +1,6 @@
 # Channels Reference
 
-This document is the canonical reference for channel configuration in ZeroClaw.
+This document is the canonical reference for channel configuration in Mentat.
 
 ## Quick Paths
 
@@ -10,7 +10,7 @@ This document is the canonical reference for channel configuration in ZeroClaw.
 
 ## In-Chat Runtime Model Switching (Telegram)
 
-When running `zeroclaw channel start` (or daemon mode), Telegram supports sender-scoped runtime switching:
+When running `mentat channel start` (or daemon mode), Telegram supports sender-scoped runtime switching:
 
 - `/models` — show available providers and current selection
 - `/models <provider>` — switch provider for the current sender session
@@ -22,12 +22,12 @@ Notes:
 
 - Switching provider or model clears only that sender's in-memory conversation history to avoid cross-model context contamination.
 - `/new` clears the sender's conversation history without changing provider or model selection.
-- Model cache previews come from `zeroclaw models refresh --provider <ID>`.
+- Model cache previews come from `mentat models refresh --provider <ID>`.
 - These are runtime chat commands, not CLI subcommands.
 
 ## Inbound Image Marker Protocol
 
-ZeroClaw supports multimodal input through inline message markers:
+Mentat supports multimodal input through inline message markers:
 
 - Syntax: ``[IMAGE:<source>]``
 - `<source>` can be:
@@ -44,7 +44,7 @@ Operational notes:
 
 ## 1. Configuration Namespace
 
-All channel settings live under `channels_config` in `~/.zeroclaw/config.toml`.
+All channel settings live under `channels_config` in `~/.mentat/config.toml`.
 
 ```toml
 [channels_config]
@@ -123,8 +123,8 @@ Slack listen behavior:
 2. Run:
 
 ```bash
-zeroclaw onboard --channels-only
-zeroclaw daemon
+mentat onboard --channels-only
+mentat daemon
 ```
 
 1. Send a message from an expected sender.
@@ -142,7 +142,7 @@ If a channel appears connected but does not respond:
 3. Confirm tokens/secrets are valid (and not expired/revoked).
 4. Confirm transport mode assumptions:
    - polling/websocket channels do not need public inbound HTTP
-5. Restart `zeroclaw daemon` after config changes.
+5. Restart `mentat daemon` after config changes.
 
 ---
 
@@ -151,13 +151,13 @@ If a channel appears connected but does not respond:
 ### 7.1 Recommended capture command
 
 ```bash
-RUST_LOG=info zeroclaw daemon 2>&1 | tee /tmp/zeroclaw.log
+RUST_LOG=info mentat daemon 2>&1 | tee /tmp/mentat.log
 ```
 
 Then filter channel/gateway events:
 
 ```bash
-rg -n "Telegram|Slack|Channel" /tmp/zeroclaw.log
+rg -n "Telegram|Slack|Channel" /tmp/mentat.log
 ```
 
 ### 7.2 Keyword table
