@@ -2,19 +2,11 @@
 
 A personal AI assistant you run on your own devices. Written in Rust. Single binary, no runtime dependencies.
 
-Mentat answers you on the channels you already use (WhatsApp, Telegram, Slack, Discord, Signal, iMessage, Matrix, IRC, Email, and more). It has a web dashboard for real-time control. The gateway is the control plane — the product is the assistant.
+Mentat answers you on messaging channels (currently Telegram and Slack) and has a web dashboard for real-time control. The gateway is the control plane — the product is the assistant.
 
 ## Install
 
 Rust stable toolchain required. Single binary, no runtime dependencies.
-
-### Homebrew
-
-```bash
-brew install mentat
-```
-
-### From source
 
 ```bash
 git clone https://github.com/nshi/mentat.git
@@ -23,12 +15,6 @@ cargo build --release --locked
 cargo install --path . --force --locked
 mentat onboard
 ```
-
-### Pre-built binaries
-
-Release assets for Linux (x86_64, aarch64, armv7), macOS (x86_64, aarch64), and Windows (x86_64):
-
-<https://github.com/nshi/mentat/releases/latest>
 
 ## Quick start
 
@@ -70,23 +56,9 @@ api_key = "sk-ant-..."
 [channels.telegram]
 bot_token = "123456:ABC-DEF..."
 
-[channels.discord]
-token = "your-bot-token"
-
 [channels.slack]
 bot_token = "xoxb-..."
 app_token = "xapp-..."
-
-[channels.whatsapp]
-enabled = true
-
-[channels.matrix]
-homeserver_url = "https://matrix.org"
-username = "@bot:matrix.org"
-password = "..."
-
-[channels.signal]
-phone_number = "+1234567890"
 ```
 
 ### Tunnels
@@ -156,7 +128,7 @@ Details: [SECURITY.md](SECURITY.md)
 - **Gateway**: HTTP/WS/SSE control plane with sessions, config, cron, webhooks, web dashboard, and pairing.
 - **Agent loop**: tool dispatch, prompt construction, message classification, memory loading.
 - **Providers**: resilient wrapper with failover, retry, and model routing across 20+ LLM backends.
-- **Channels**: WhatsApp, Telegram, Slack, Discord, Signal, iMessage, Matrix, IRC, Email, Bluesky, DingTalk, Lark, Mattermost, Nostr, QQ, Reddit, LinkedIn, Twitter, MQTT, WeChat Work, and more.
+- **Channels**: Telegram and Slack (more planned).
 - **Tools**: shell, file I/O, browser, git, web fetch/search, MCP, and 70+ more.
 - **Web dashboard**: React 19 + Vite with real-time chat, memory browser, config editor, cron manager.
 
@@ -177,27 +149,12 @@ mentat skills remove my-skill
 
 ## Prerequisites
 
-<details>
-<summary><strong>Linux / macOS</strong></summary>
+- **Debian/Ubuntu:** `sudo apt install build-essential pkg-config`
+- **Fedora/RHEL:** `sudo dnf group install development-tools && sudo dnf install pkg-config`
+- **macOS:** `xcode-select --install`
+- **Rust toolchain:** `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 
-1. Build essentials:
-   - **Debian/Ubuntu:** `sudo apt install build-essential pkg-config`
-   - **Fedora/RHEL:** `sudo dnf group install development-tools && sudo dnf install pkg-config`
-   - **macOS:** `xcode-select --install`
-
-2. Rust toolchain: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-
-Building from source needs ~2GB RAM + swap minimum (4GB+ recommended) and ~6GB disk (10GB+ recommended). Use `./install.sh --prefer-prebuilt` on constrained hardware.
-
-</details>
-
-<details>
-<summary><strong>Windows</strong></summary>
-
-1. Visual Studio Build Tools with "Desktop development with C++" workload: `winget install Microsoft.VisualStudio.2022.BuildTools`
-2. Rust toolchain: `winget install Rustlang.Rustup`
-
-</details>
+Building from source needs ~2GB RAM (4GB+ recommended) and ~6GB disk (10GB+ recommended).
 
 ## Docs
 
