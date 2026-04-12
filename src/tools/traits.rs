@@ -56,6 +56,40 @@ macro_rules! require_str {
     };
 }
 
+/// Shared security gate for mutating tool actions.
+pub fn enforce_security_policy(
+    security: &crate::security::SecurityPolicy,
+    action: &str,
+) -> Option<ToolResult> {
+    if !security.can_act() {
+        return Some(ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!(
+                "Security policy: read-only mode, cannot perform '{action}'"
+            )),
+        });
+    }
+
+    if security.is_rate_limited() {
+        return Some(ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some("Rate limit exceeded: too many actions in the last hour".to_string()),
+        });
+    }
+
+    if !security.record_action() {
+        return Some(ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some("Rate limit exceeded: action budget exhausted".to_string()),
+        });
+    }
+
+    None
+}
+
 /// Description of a tool for the LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSpec {

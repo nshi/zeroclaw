@@ -1,4 +1,4 @@
-use super::traits::{Tool, ToolResult};
+use super::traits::{Tool, ToolResult, enforce_security_policy};
 use crate::require_str;
 use crate::config::Config;
 use crate::cron;
@@ -134,25 +134,7 @@ impl ScheduleTool {
             });
         }
 
-        if !self.security.can_act() {
-            return Some(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "Security policy: read-only mode, cannot perform '{action}'"
-                )),
-            });
-        }
-
-        if !self.security.record_action() {
-            return Some(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded: action budget exhausted".to_string()),
-            });
-        }
-
-        None
+        enforce_security_policy(&self.security, action)
     }
 
     fn handle_list(&self) -> Result<ToolResult> {
