@@ -200,6 +200,36 @@ static SENSITIVE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(token|api[_-]?key|password|secret|user[_-]?key|bearer|credential)["']?\s*[:=]\s*(?:"([^"]{8,})"|'([^']{8,})'|([a-zA-Z0-9_\-\.]{8,}))"#).unwrap()
 });
 
+/// Detect when the LLM returned a text-only response that should have been a tool
+/// call. Returns a system nudge message if a missed tool use is detected.
+///
+/// Currently checks for:
+/// - Questions asked as plain text when `ask_user` is available (only triggers
+///   when the last non-empty line of the response ends with `?`, reducing false
+///   positives from rhetorical or explanatory questions mid-text).
+fn detect_missed_tool_use(response: &str, tool_specs: &[crate::tools::ToolSpec]) -> Option<String> {
+    if !tool_specs.iter().any(|t| t.name == "ask_user") {
+        return None;
+    }
+
+    let last_line = response.lines().rev().find(|l| !l.trim().is_empty());
+    let is_question = last_line.is_some_and(|line| {
+        let t = line.trim();
+        t.ends_with('?') && t.len() > 5 && !t.starts_with("//") && !t.starts_with('#')
+    });
+
+    if is_question {
+        return Some(
+            "[System] You asked the user a question as plain text, but the user cannot reply \
+to text output. Use the `ask_user` tool to ask questions interactively. \
+Re-issue your question using the ask_user tool now."
+                .into(),
+        );
+    }
+
+    None
+}
+
 /// Scrub credentials from tool output to prevent accidental exfiltration.
 /// Replaces known credential patterns with a redacted placeholder while preserving
 /// a small prefix for context.
@@ -2299,6 +2329,8 @@ pub(crate) async fn run_tool_call_loop(
         },
     );
 
+    let mut tool_use_nudged = false;
+
     for iteration in 0..max_iterations {
         let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
 
@@ -2839,6 +2871,17 @@ pub(crate) async fn run_tool_call_loop(
                         tool_calls.len()
                     )))
                     .await;
+            }
+        }
+
+        // Nudge at most once per invocation to prevent infinite re-prompts.
+        if tool_calls.is_empty() && !tool_use_nudged {
+            if let Some(nudge) = detect_missed_tool_use(&display_text, &tool_specs) {
+                tool_use_nudged = true;
+                tracing::info!("Nudging LLM to use tool instead of plain text");
+                history.push(ChatMessage::assistant(response_text.clone()));
+                history.push(ChatMessage::system(nudge));
+                continue;
             }
         }
 
@@ -3710,7 +3753,10 @@ pub async fn run(
         )
         .await;
         let skill_hint = crate::agent::prompt::build_skill_hint(&skills, &effective_msg);
-        let context = format!("{mem_context}{skill_hint}");
+        let loop_tool_specs: Vec<crate::tools::ToolSpec> =
+            tools_registry.iter().map(|t| t.spec()).collect();
+        let tool_hint = crate::agent::prompt::build_tool_hint(&loop_tool_specs, &effective_msg);
+        let context = format!("{mem_context}{skill_hint}{tool_hint}");
         let enriched = crate::agent::prompt::timestamp_prefix(&effective_msg, Some(&context));
 
         let mut history = vec![
@@ -3971,7 +4017,11 @@ pub async fn run(
             )
             .await;
             let skill_hint = crate::agent::prompt::build_skill_hint(&skills, &effective_input);
-            let context = format!("{mem_context}{skill_hint}");
+            let repl_tool_specs: Vec<crate::tools::ToolSpec> =
+                tools_registry.iter().map(|t| t.spec()).collect();
+            let tool_hint =
+                crate::agent::prompt::build_tool_hint(&repl_tool_specs, &effective_input);
+            let context = format!("{mem_context}{skill_hint}{tool_hint}");
             let enriched = crate::agent::prompt::timestamp_prefix(&effective_input, Some(&context));
 
             history.push(ChatMessage::user(&enriched));
@@ -4405,7 +4455,10 @@ pub async fn process_message(
     )
     .await;
     let skill_hint = crate::agent::prompt::build_skill_hint(&skills, effective_msg_ref);
-    let context = format!("{mem_context}{skill_hint}");
+    let pm_tool_specs: Vec<crate::tools::ToolSpec> =
+        tools_registry.iter().map(|t| t.spec()).collect();
+    let tool_hint = crate::agent::prompt::build_tool_hint(&pm_tool_specs, effective_msg_ref);
+    let context = format!("{mem_context}{skill_hint}{tool_hint}");
     let enriched = crate::agent::prompt::timestamp_prefix(effective_msg_ref, Some(&context));
 
     let mut history = vec![
@@ -4743,6 +4796,57 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    fn specs_with_ask_user() -> Vec<crate::tools::ToolSpec> {
+        vec![crate::tools::ToolSpec {
+            name: "ask_user".into(),
+            description: "Ask the user".into(),
+            parameters: serde_json::json!({}),
+        }]
+    }
+
+    #[test]
+    fn detect_missed_tool_use_catches_question_when_ask_user_available() {
+        let response = "What environment should I deploy to?";
+        assert!(detect_missed_tool_use(response, &specs_with_ask_user()).is_some());
+    }
+
+    #[test]
+    fn detect_missed_tool_use_ignores_question_without_ask_user() {
+        let specs = vec![crate::tools::ToolSpec {
+            name: "shell".into(),
+            description: "Run shell commands".into(),
+            parameters: serde_json::json!({}),
+        }];
+        assert!(detect_missed_tool_use("What environment should I deploy to?", &specs).is_none());
+    }
+
+    #[test]
+    fn detect_missed_tool_use_ignores_code_comments() {
+        assert!(
+            detect_missed_tool_use("// TODO: should we refactor this?", &specs_with_ask_user())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn detect_missed_tool_use_ignores_short_questions() {
+        assert!(detect_missed_tool_use("OK?", &specs_with_ask_user()).is_none());
+    }
+
+    #[test]
+    fn detect_missed_tool_use_no_question_mark() {
+        assert!(
+            detect_missed_tool_use("Deployment completed successfully.", &specs_with_ask_user())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn detect_missed_tool_use_only_triggers_on_last_line() {
+        let response = "Should this work? Yes, here's why.\nThe deployment is complete.";
+        assert!(detect_missed_tool_use(response, &specs_with_ask_user()).is_none());
+    }
 
     #[test]
     fn scrub_credentials_redacts_bearer_token() {

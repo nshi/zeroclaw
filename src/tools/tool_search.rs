@@ -50,8 +50,6 @@ pub struct ToolSearchTool {
     deferred: Option<DeferredMcpToolSet>,
     activated: Option<Arc<Mutex<ActivatedToolSet>>>,
     builtin_specs: Vec<ToolSpec>,
-    /// Pre-lowercased `"name description"` per spec, for keyword matching.
-    builtin_haystacks: Vec<String>,
 }
 
 impl ToolSearchTool {
@@ -61,38 +59,65 @@ impl ToolSearchTool {
         activated: Arc<Mutex<ActivatedToolSet>>,
         builtin_specs: Vec<ToolSpec>,
     ) -> Self {
-        let builtin_haystacks = build_haystacks(&builtin_specs);
         Self {
             deferred: Some(deferred),
             activated: Some(activated),
             builtin_specs,
-            builtin_haystacks,
         }
     }
 
     /// Create with only built-in tool specs (no MCP deferred tools).
     pub fn builtin_only(builtin_specs: Vec<ToolSpec>) -> Self {
-        let builtin_haystacks = build_haystacks(&builtin_specs);
         Self {
             deferred: None,
             activated: None,
             builtin_specs,
-            builtin_haystacks,
         }
     }
 }
 
-fn build_haystacks(specs: &[ToolSpec]) -> Vec<String> {
-    specs
+/// Keyword-search tool specs by matching query terms against `"name description"`
+/// haystacks. Returns indices into `specs` sorted by hit count (descending).
+///
+/// This is the shared search algorithm used by both `ToolSearchTool::search_builtins`
+/// and `build_tool_hint`. It performs read-only matching — no tool activation.
+pub fn keyword_search_specs(
+    specs: &[ToolSpec],
+    terms: &[String],
+    min_hits: usize,
+    max_results: usize,
+) -> Vec<(usize, usize)> {
+    if terms.is_empty() {
+        return specs
+            .iter()
+            .enumerate()
+            .take(max_results)
+            .map(|(i, _)| (i, 0))
+            .collect();
+    }
+    let mut scored: Vec<(usize, usize)> = specs
         .iter()
-        .map(|s| {
-            format!(
+        .enumerate()
+        .filter_map(|(i, spec)| {
+            let haystack = format!(
                 "{} {}",
-                s.name.to_ascii_lowercase(),
-                s.description.to_ascii_lowercase()
-            )
+                spec.name.to_ascii_lowercase(),
+                spec.description.to_ascii_lowercase()
+            );
+            let hits = terms
+                .iter()
+                .filter(|t| haystack.contains(t.as_str()))
+                .count();
+            if hits >= min_hits {
+                Some((i, hits))
+            } else {
+                None
+            }
         })
-        .collect()
+        .collect();
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.truncate(max_results);
+    scored
 }
 
 #[async_trait]
@@ -217,25 +242,8 @@ impl ToolSearchTool {
             .split_whitespace()
             .map(|t| t.to_ascii_lowercase())
             .collect();
-        if terms.is_empty() {
-            return self.builtin_specs.iter().take(max_results).collect();
-        }
-        let mut scored: Vec<(usize, usize)> = self
-            .builtin_haystacks
-            .iter()
-            .enumerate()
-            .filter_map(|(i, haystack)| {
-                let hits = terms
-                    .iter()
-                    .filter(|t| haystack.contains(t.as_str()))
-                    .count();
-                if hits > 0 { Some((i, hits)) } else { None }
-            })
-            .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
-        scored
+        keyword_search_specs(&self.builtin_specs, &terms, 1, max_results)
             .into_iter()
-            .take(max_results)
             .map(|(i, _)| &self.builtin_specs[i])
             .collect()
     }

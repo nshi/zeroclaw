@@ -173,10 +173,12 @@ impl Tool for EscalateToHumanTool {
     }
 
     fn description(&self) -> &str {
-        "Escalate a situation to a human operator with urgency routing. \
-         Sends a structured message to the active channel. High/critical urgency \
-         also triggers a Pushover mobile notification when configured. \
-         Optionally blocks to wait for a human response."
+        "Escalate a situation to a human operator with urgency routing. Use this when you \
+         encounter a problem you cannot resolve autonomously, need human judgment for a \
+         high-stakes decision, or detect a potential security or safety concern. Sends a \
+         structured message to the active channel. High/critical urgency also triggers a \
+         Pushover mobile notification when configured. Optionally blocks to wait for a \
+         human response."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

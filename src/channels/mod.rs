@@ -2444,7 +2444,11 @@ async fn process_channel_message(
 
     // Preserve user turn before the LLM call so interrupted requests keep context.
     let skill_hint = crate::agent::prompt::build_skill_hint(&ctx.skills, &msg.content);
-    let stamped_content = crate::agent::prompt::timestamp_prefix(&msg.content, Some(&skill_hint));
+    let ch_tool_specs: Vec<crate::tools::ToolSpec> =
+        ctx.tools_registry.iter().map(|t| t.spec()).collect();
+    let tool_hint = crate::agent::prompt::build_tool_hint(&ch_tool_specs, &msg.content);
+    let hints = format!("{skill_hint}{tool_hint}");
+    let stamped_content = crate::agent::prompt::timestamp_prefix(&msg.content, Some(&hints));
     append_sender_turn(
         ctx.as_ref(),
         &history_key,

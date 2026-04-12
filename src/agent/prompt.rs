@@ -28,14 +28,16 @@ pub const ANTI_NARRATION_TEXT: &str = "\
 pub const AUTONOMY_FULL_TEXT: &str = "\
 - Allowed tools/actions: execute directly, no extra approval needed.\n\
 - You have full access to all configured tools. Use them confidently.\n\
-- Blocked tools/actions: explain the concrete restriction. Never simulate an approval dialog.";
+- Blocked tools/actions: explain the concrete restriction. Never simulate an approval dialog.\n\
+- For genuinely ambiguous requests where multiple valid interpretations exist, use `ask_user` to clarify.";
 
 pub const AUTONOMY_READONLY_TEXT: &str = "\
 - This runtime is read-only. Write operations will be rejected.\n\
 - Use read-only tools freely and confidently.";
 
 pub const AUTONOMY_SUPERVISED_TEXT: &str = "\
-- Ask for approval when the runtime policy requires it for the specific action.\n\
+- When you need user input, confirmation, or approval: call the `ask_user` tool. Do NOT ask questions as plain text — the user cannot reply to text output.\n\
+- For urgent situations or problems you cannot resolve alone: call `escalate_to_human`.\n\
 - Do not preemptively refuse — attempt actions and let the runtime enforce restrictions.\n\
 - Use available tools confidently; the security policy will enforce boundaries.";
 
@@ -124,6 +126,63 @@ pub fn build_skill_hint(skills: &[crate::skills::Skill], user_message: &str) -> 
         hint.push_str("]\n");
     }
 
+    hint
+}
+
+/// Pre-emptive tool hint: search the tool registry for tools whose name or
+/// description matches keywords in the user message, and return a short hint
+/// so the LLM is aware of relevant tools it might otherwise overlook.
+///
+/// Unlike `tool_search` (which activates deferred tools), this performs a
+/// read-only keyword search against tool specs already in the registry.
+/// The LLM decides whether to actually use the tool — the hint is advisory.
+///
+/// Returns an empty string when no tools match or the message is empty.
+pub fn build_tool_hint(tool_specs: &[crate::tools::ToolSpec], user_message: &str) -> String {
+    use crate::tools::tool_search::keyword_search_specs;
+    use std::fmt::Write;
+
+    if tool_specs.is_empty() || user_message.is_empty() {
+        return String::new();
+    }
+
+    // Filter out short words and common stop words to reduce false positives.
+    const STOP_WORDS: &[&str] = &[
+        "all", "also", "and", "any", "are", "been", "but", "call", "can", "did", "does", "done",
+        "each", "few", "for", "from", "get", "got", "had", "has", "her", "him", "his", "how",
+        "into", "its", "just", "let", "like", "make", "many", "may", "more", "most", "must",
+        "need", "new", "not", "now", "old", "one", "only", "our", "out", "over", "run", "see",
+        "set", "some", "such", "take", "than", "that", "the", "them", "then", "they", "this",
+        "too", "use", "very", "want", "was", "way", "well", "were", "what", "when", "who", "will",
+        "with", "yet", "you", "your",
+    ];
+    let terms: Vec<String> = user_message
+        .split_whitespace()
+        .map(|t| {
+            t.to_ascii_lowercase()
+                .trim_end_matches(|c: char| c.is_ascii_punctuation())
+                .to_string()
+        })
+        .filter(|t| t.len() >= 3 && !STOP_WORDS.contains(&t.as_str()))
+        .collect();
+
+    if terms.is_empty() {
+        return String::new();
+    }
+
+    let results = keyword_search_specs(tool_specs, &terms, 2, 3);
+    if results.is_empty() {
+        return String::new();
+    }
+
+    let mut hint = String::from("[Tool hint: potentially relevant tools for this request:\n");
+    for (idx, _) in &results {
+        let spec = &tool_specs[*idx];
+        let desc = &spec.description;
+        let short_desc = desc.find(". ").map_or(desc.as_str(), |i| &desc[..=i]);
+        let _ = writeln!(hint, "- {}: {short_desc}", spec.name);
+    }
+    hint.push_str("These tools are already available — call them directly if relevant.]\n");
     hint
 }
 
@@ -354,7 +413,8 @@ impl PromptSection for ToolsSection {
         }
         if has_tool_search {
             out.push_str(
-                "\n**Note:** More tools exist beyond those listed. Use **tool_search** with keywords to discover capabilities (HTTP, git, web search, notifications, image generation, etc.).\n",
+                "\n**Important:** The tools listed above are a subset. Before concluding that \
+you cannot perform an action, use **tool_search** with keywords to check for additional capabilities.\n",
             );
         }
         if !ctx.dispatcher_instructions.is_empty() {
@@ -503,6 +563,7 @@ impl PromptSection for TaskInstructionSection {
         if ctx.native_tools {
             Ok("## Your Task\n\n\
                 Respond naturally. Use tools when action is needed. Answer follow-ups from conversation context.\n\
+                When you think a capability might exist but aren't sure which tool to use, call `tool_search` with keywords to discover it.\n\
                 Do NOT: summarize this config, describe capabilities, or output meta-commentary."
                 .into())
         } else {
@@ -1303,6 +1364,70 @@ mod tests {
     fn skill_hint_slash_no_cross_match() {
         let skills = vec![make_skill("commit", vec![])];
         let hint = build_skill_hint(&skills, "/deploy now");
+        assert!(hint.is_empty());
+    }
+
+    // ── Tool hint tests ────────────────────────────────────────────
+
+    fn make_tool_spec(name: &str, description: &str) -> crate::tools::ToolSpec {
+        crate::tools::ToolSpec {
+            name: name.into(),
+            description: description.into(),
+            parameters: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn tool_hint_empty_when_no_tools() {
+        assert_eq!(build_tool_hint(&[], "ask user for confirmation"), "");
+    }
+
+    #[test]
+    fn tool_hint_empty_when_no_match() {
+        let specs = vec![make_tool_spec("shell", "Run shell commands")];
+        assert_eq!(build_tool_hint(&specs, "what is the weather today"), "");
+    }
+
+    #[test]
+    fn tool_hint_matches_on_two_keyword_hits() {
+        let specs = vec![make_tool_spec(
+            "ask_user",
+            "Ask the user a question and wait for their response",
+        )];
+        let hint = build_tool_hint(&specs, "ask the user which environment to deploy");
+        assert!(hint.contains("ask_user"));
+        assert!(hint.contains("Tool hint"));
+    }
+
+    #[test]
+    fn tool_hint_no_match_on_single_keyword() {
+        let specs = vec![make_tool_spec(
+            "ask_user",
+            "Ask the user a question and wait for their response",
+        )];
+        // Only "deploy" matches nothing in the tool — needs >= 2 hits
+        let hint = build_tool_hint(&specs, "deploy this service now");
+        assert!(hint.is_empty());
+    }
+
+    #[test]
+    fn tool_hint_capped_at_three() {
+        let specs = vec![
+            make_tool_spec("tool_a", "search files quickly"),
+            make_tool_spec("tool_b", "search code quickly"),
+            make_tool_spec("tool_c", "search logs quickly"),
+            make_tool_spec("tool_d", "search metrics quickly"),
+        ];
+        let hint = build_tool_hint(&specs, "search quickly for something");
+        let count = hint.matches("- tool_").count();
+        assert!(count <= 3, "expected at most 3 tool hints, got {count}");
+    }
+
+    #[test]
+    fn tool_hint_short_words_ignored() {
+        let specs = vec![make_tool_spec("ask_user", "Ask the user a question")];
+        // "is" and "it" are < 3 chars, filtered out
+        let hint = build_tool_hint(&specs, "is it ok");
         assert!(hint.is_empty());
     }
 

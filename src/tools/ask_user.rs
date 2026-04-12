@@ -75,9 +75,12 @@ impl Tool for AskUserTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user a question and wait for their response. \
-         Sends the question to a messaging channel and blocks until the user replies \
-         or the timeout expires. Optionally provide choices for structured responses."
+        "Ask the user a question and wait for their response. Use this tool whenever you need \
+         clarification, confirmation, or approval — especially for ambiguous requests, \
+         destructive actions, or decisions with multiple valid options. Do NOT ask questions as \
+         plain text; the user cannot reply to plain text. Sends the question to a messaging \
+         channel and blocks until the user replies or the timeout expires. Optionally provide \
+         choices for structured responses."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
