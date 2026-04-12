@@ -701,7 +701,9 @@ mod tests {
         assert_eq!(kinds, vec!["cron", "at", "every"]);
 
         // All schedule fields are present
-        let props = sched["properties"].as_object().expect("schedule.properties");
+        let props = sched["properties"]
+            .as_object()
+            .expect("schedule.properties");
         assert!(props.contains_key("kind"));
         assert!(props.contains_key("expr"));
         assert!(props.contains_key("tz"));

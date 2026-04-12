@@ -1,6 +1,8 @@
 use super::traits::{Tool, ToolResult, enforce_security_policy};
 use crate::config::Config;
-use crate::cron::{self, CronJobPatch, delivery_json_schema, deserialize_maybe_stringified, schedule_json_schema};
+use crate::cron::{
+    self, CronJobPatch, delivery_json_schema, deserialize_maybe_stringified, schedule_json_schema,
+};
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -370,10 +372,7 @@ mod tests {
 
         // patch.schedule is a flat object (no oneOf)
         let sched = &schema["properties"]["patch"]["properties"]["schedule"];
-        assert!(
-            sched.get("oneOf").is_none(),
-            "schedule must NOT use oneOf"
-        );
+        assert!(sched.get("oneOf").is_none(), "schedule must NOT use oneOf");
         assert_eq!(sched["type"], "object");
 
         let kind_enum = sched["properties"]["kind"]["enum"]
@@ -383,9 +382,14 @@ mod tests {
         assert_eq!(kinds, vec!["cron", "at", "every"]);
 
         // All schedule fields present
-        let sched_props = sched["properties"].as_object().expect("schedule.properties");
+        let sched_props = sched["properties"]
+            .as_object()
+            .expect("schedule.properties");
         for field in &["kind", "expr", "tz", "at", "every_ms"] {
-            assert!(sched_props.contains_key(*field), "schedule missing: {field}");
+            assert!(
+                sched_props.contains_key(*field),
+                "schedule missing: {field}"
+            );
         }
         assert_eq!(
             sched_props["every_ms"]["type"].as_str(),

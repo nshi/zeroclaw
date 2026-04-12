@@ -48,9 +48,10 @@ macro_rules! require_str {
         match $args.get($param).and_then(|v| v.as_str()) {
             Some(v) if !v.is_empty() => v,
             _ => {
-                return $crate::tools::traits::ToolResult::err(
-                    format!("Missing required parameter '{}'", $param),
-                );
+                return $crate::tools::traits::ToolResult::err(format!(
+                    "Missing required parameter '{}'",
+                    $param
+                ));
             }
         }
     };
