@@ -139,6 +139,7 @@ pub fn build_skill_hint(skills: &[crate::skills::Skill], user_message: &str) -> 
 ///
 /// Returns an empty string when no tools match or the message is empty.
 pub fn build_tool_hint(tool_specs: &[crate::tools::ToolSpec], user_message: &str) -> String {
+    use crate::tools::tool_search::keyword_search_specs;
     use std::fmt::Write;
 
     if tool_specs.is_empty() || user_message.is_empty() {
@@ -169,37 +170,17 @@ pub fn build_tool_hint(tool_specs: &[crate::tools::ToolSpec], user_message: &str
         return String::new();
     }
 
-    let mut scored: Vec<(&str, &str, usize)> = tool_specs
-        .iter()
-        .filter_map(|spec| {
-            let haystack = format!(
-                "{} {}",
-                spec.name.to_ascii_lowercase(),
-                spec.description.to_ascii_lowercase()
-            );
-            let hits = terms
-                .iter()
-                .filter(|t| haystack.contains(t.as_str()))
-                .count();
-            if hits >= 2 {
-                Some((spec.name.as_str(), spec.description.as_str(), hits))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if scored.is_empty() {
+    let results = keyword_search_specs(tool_specs, &terms, 2, 3);
+    if results.is_empty() {
         return String::new();
     }
 
-    scored.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(b.0)));
-    scored.truncate(3);
-
     let mut hint = String::from("[Tool hint: potentially relevant tools for this request:\n");
-    for (name, desc, _) in &scored {
-        let short_desc = desc.find(". ").map_or(*desc, |i| &desc[..=i]);
-        let _ = writeln!(hint, "- {name}: {short_desc}");
+    for (idx, _) in &results {
+        let spec = &tool_specs[*idx];
+        let desc = &spec.description;
+        let short_desc = desc.find(". ").map_or(desc.as_str(), |i| &desc[..=i]);
+        let _ = writeln!(hint, "- {}: {short_desc}", spec.name);
     }
     hint.push_str("These tools are already available — call them directly if relevant.]\n");
     hint
