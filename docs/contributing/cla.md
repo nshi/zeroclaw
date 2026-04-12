@@ -1,14 +1,14 @@
 # Mentat Contributor License Agreement (CLA)
 
 **Version 1.0 — February 2026**  
-**Mentat Labs**
+**the Mentat project maintainers**
 
 ---
 
 ## Purpose
 
 This Contributor License Agreement ("CLA") clarifies the intellectual
-property rights granted by contributors to Mentat Labs. This agreement
+property rights granted by contributors to the Mentat project maintainers. This agreement
 protects both contributors and users of the Mentat project.
 
 By submitting a contribution (pull request, patch, issue with code, or any
@@ -20,19 +20,19 @@ terms of this CLA.
 ## 1. Definitions
 
 - **"Contribution"** means any original work of authorship, including any
-  modifications or additions to existing work, submitted to Mentat Labs
+  modifications or additions to existing work, submitted to the Mentat project maintainers
   for inclusion in the Mentat project.
 
 - **"You"** means the individual or legal entity submitting a Contribution.
 
-- **"Mentat Labs"** means the maintainers and organization responsible
+- **"the Mentat project maintainers"** means the maintainers and organization responsible
   for the Mentat project at https://github.com/nshi/mentat.
 
 ---
 
 ## 2. Grant of Copyright License
 
-You grant Mentat Labs and recipients of software distributed by Mentat
+You grant the Mentat project maintainers and recipients of software distributed by Mentat
 Labs a perpetual, worldwide, non-exclusive, no-charge, royalty-free,
 irrevocable copyright license to:
 
@@ -44,7 +44,7 @@ irrevocable copyright license to:
 
 ## 3. Grant of Patent License
 
-You grant Mentat Labs and recipients of software distributed by Mentat
+You grant the Mentat project maintainers and recipients of software distributed by Mentat
 Labs a perpetual, worldwide, non-exclusive, no-charge, royalty-free,
 irrevocable patent license to make, have made, use, offer to sell, sell,
 import, and otherwise transfer your Contributions.
@@ -77,22 +77,21 @@ You represent that:
    copyright, trademark, or other intellectual property right.
 3. If your employer has rights to intellectual property you create, you
    have received permission to submit the Contribution, or your employer
-   has signed a corporate CLA with Mentat Labs.
+   has signed a corporate CLA with the Mentat project maintainers.
 
 ---
 
 ## 6. No Trademark Rights
 
 This CLA does not grant you any rights to use the Mentat name,
-trademarks, service marks, or logos. See [trademark.md](../maintainers/trademark.md) for trademark policy.
+trademarks, service marks, or logos.
 
 ---
 
 ## 7. Attribution
 
-Mentat Labs will maintain attribution to contributors in the repository
-commit history and NOTICE file. Your contributions are permanently and
-publicly recorded.
+The Mentat project maintainers will maintain attribution to contributors in the repository
+commit history. Your contributions are permanently and publicly recorded.
 
 ---
 

@@ -26,7 +26,6 @@ Last refreshed: **February 18, 2026**.
 - [channels-reference.md](reference/api/channels-reference.md)
 - [config-reference.md](reference/api/config-reference.md)
 - [custom-providers.md](contributing/custom-providers.md)
-- [langgraph-integration.md](contributing/langgraph-integration.md)
 
 ### 3) Operations & Deployment
 
@@ -57,8 +56,7 @@ Last refreshed: **February 18, 2026**.
 - [extension-examples.md](contributing/extension-examples.md)
 - [testing.md](contributing/testing.md)
 
-### 6) Project Status & Snapshot
+### 6) Project
 
 - [maintainers/README.md](maintainers/README.md)
-- [project-triage-snapshot-2026-02-18.md](maintainers/project-triage-snapshot-2026-02-18.md)
 - [docs-inventory.md](maintainers/docs-inventory.md)

@@ -43,7 +43,6 @@ Use this grouping to decide where new docs belong.
 ### Setup / Integration Guides
 
 - `docs/custom-providers.md`
-- `docs/langgraph-integration.md`
 - `docs/network-deployment.md`
 
 ### Policy / Process

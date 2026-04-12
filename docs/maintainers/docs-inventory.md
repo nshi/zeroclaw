@@ -42,7 +42,6 @@ Last reviewed: **February 18, 2026**.
 | `docs/channels-reference.md` | Current Reference | users/operators |
 | `docs/config-reference.md` | Current Reference | operators |
 | `docs/custom-providers.md` | Current Integration Guide | integration developers |
-| `docs/langgraph-integration.md` | Current Integration Guide | integration developers |
 | `docs/operations-runbook.md` | Current Guide | operators |
 | `docs/troubleshooting.md` | Current Guide | users/operators |
 | `docs/network-deployment.md` | Current Guide | operators |
@@ -75,12 +74,6 @@ These are valuable context, but **not strict runtime contracts**.
 | `docs/agnostic-security.md` | Proposal |
 | `docs/frictionless-security.md` | Proposal |
 | `docs/security-roadmap.md` | Roadmap |
-
-## Snapshot Docs
-
-| Doc | Type |
-|---|---|
-| `docs/project-triage-snapshot-2026-02-18.md` | Snapshot |
 
 ## Maintenance Recommendations
 

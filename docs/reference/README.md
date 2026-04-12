@@ -9,10 +9,9 @@ Structured reference index for commands, providers, channels, config, and integr
 - Channel setup + allowlists: [api/channels-reference.md](api/channels-reference.md)
 - Config defaults and keys: [api/config-reference.md](api/config-reference.md)
 
-## Provider & Integration Extensions
+## Extensions
 
 - Custom provider endpoints: [../contributing/custom-providers.md](../contributing/custom-providers.md)
-- LangGraph-based integration patterns: [../contributing/langgraph-integration.md](../contributing/langgraph-integration.md)
 
 ## Usage
 

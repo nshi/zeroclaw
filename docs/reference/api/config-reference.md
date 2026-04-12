@@ -316,13 +316,13 @@ Notes:
 
 | Key | Default | Purpose |
 |---|---|---|
-| `format` | `openclaw` | Identity format: `"openclaw"` (default) or `"aieos"` |
+| `format` | `mentat` | Identity format: `"mentat"` (default) or `"aieos"` |
 | `aieos_path` | unset | Path to AIEOS JSON file (relative to workspace) |
 | `aieos_inline` | unset | Inline AIEOS JSON (alternative to file path) |
 
 Notes:
 
-- Use `format = "aieos"` with either `aieos_path` or `aieos_inline` to load an AIEOS / OpenClaw identity document.
+- Use `format = "aieos"` with either `aieos_path` or `aieos_inline` to load an AIEOS identity document.
 - Only one of `aieos_path` or `aieos_inline` should be set; `aieos_path` takes precedence.
 
 ## `[multimodal]`

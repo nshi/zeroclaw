@@ -14,11 +14,9 @@ Last refreshed: **February 21, 2026**.
 | Find commands by task | [commands-reference.md](reference/cli/commands-reference.md) |
 | Check config defaults and keys quickly | [config-reference.md](reference/api/config-reference.md) |
 | Configure custom providers/endpoints | [custom-providers.md](contributing/custom-providers.md) |
-| Use LangGraph integration patterns | [langgraph-integration.md](contributing/langgraph-integration.md) |
 | Operate runtime (day-2 runbook) | [operations-runbook.md](ops/operations-runbook.md) |
 | Troubleshoot install/runtime/channel issues | [troubleshooting.md](ops/troubleshooting.md) |
 | Browse docs by category | [SUMMARY.md](SUMMARY.md) |
-| See project PR/issue docs snapshot | [project-triage-snapshot-2026-02-18.md](maintainers/project-triage-snapshot-2026-02-18.md) |
 
 ## Quick Decision Tree (10 seconds)
 
@@ -37,7 +35,7 @@ Last refreshed: **February 21, 2026**.
 - Operations & deployment: [ops/README.md](ops/README.md)
 - Security docs: [security/README.md](security/README.md)
 - Contributing/CI: [contributing/README.md](contributing/README.md)
-- Project snapshots: [maintainers/README.md](maintainers/README.md)
+- Project: [maintainers/README.md](maintainers/README.md)
 
 ## By Audience
 
@@ -48,7 +46,6 @@ Last refreshed: **February 21, 2026**.
 - [channels-reference.md](reference/api/channels-reference.md) — channel capabilities and setup paths
 - [config-reference.md](reference/api/config-reference.md) — high-signal config keys and secure defaults
 - [custom-providers.md](contributing/custom-providers.md) — custom provider/base URL integration templates
-- [langgraph-integration.md](contributing/langgraph-integration.md) — fallback integration for model/tool-calling edge cases
 - [operations-runbook.md](ops/operations-runbook.md) — day-2 runtime operations and rollback flow
 - [troubleshooting.md](ops/troubleshooting.md) — common failure signatures and recovery steps
 
@@ -72,9 +69,8 @@ Last refreshed: **February 21, 2026**.
 - [resource-limits.md](ops/resource-limits.md)
 - [security-roadmap.md](security/security-roadmap.md)
 
-## System Navigation & Governance
+## System Navigation
 
 - Unified TOC: [SUMMARY.md](SUMMARY.md)
-- Docs structure map (language/part/function): [structure/README.md](maintainers/structure-README.md)
-- Documentation inventory/classification: [docs-inventory.md](maintainers/docs-inventory.md)
-- Project triage snapshot: [project-triage-snapshot-2026-02-18.md](maintainers/project-triage-snapshot-2026-02-18.md)
+- Docs structure map: [structure/README.md](maintainers/structure-README.md)
+- Documentation inventory: [docs-inventory.md](maintainers/docs-inventory.md)
