@@ -195,13 +195,13 @@ goto :do_build
 
 :: ---- Standard build ----
 :build_standard
-set "FEATURES=--features channel-matrix,channel-lark"
-set "BUILD_DESC=standard (Matrix + Lark/Feishu)"
+set "FEATURES="
+set "BUILD_DESC=standard (default features)"
 goto :do_build
 
 :: ---- Full build ----
 :build_full
-set "FEATURES=--features channel-matrix,channel-lark,browser-native,hardware,rag-pdf,observability-otel"
+set "FEATURES=--features browser-native,rag-pdf,observability-otel"
 set "BUILD_DESC=full (all features)"
 goto :do_build
 

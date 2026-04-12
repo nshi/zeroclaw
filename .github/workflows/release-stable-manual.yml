@@ -23,7 +23,7 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  RELEASE_CARGO_FEATURES: channel-matrix,channel-lark,whatsapp-web
+  RELEASE_CARGO_FEATURES: ""
 
 jobs:
   validate:
@@ -221,8 +221,7 @@ jobs:
             ext: tar.gz
             ndk: true
             experimental: true
-            # wa-rs crates don't compile for Android; exclude whatsapp-web
-            cargo_features: "channel-matrix,channel-lark"
+            cargo_features: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: mentat.exe
@@ -276,9 +275,15 @@ jobs:
           # Use matrix-level feature override if set, otherwise use global RELEASE_CARGO_FEATURES
           FEATURES="${{ matrix.cargo_features || env.RELEASE_CARGO_FEATURES }}"
           if [ "${{ matrix.skip_prometheus || 'false' }}" = "true" ]; then
-            cargo build --release --locked --no-default-features --features "${FEATURES},channel-nostr,skill-creation" --target ${{ matrix.target }}
+            EXTRA="skill-creation"
+            [ -n "$FEATURES" ] && EXTRA="${FEATURES},${EXTRA}"
+            cargo build --release --locked --no-default-features --features "${EXTRA}" --target ${{ matrix.target }}
           else
-            cargo build --release --locked --features "${FEATURES}" --target ${{ matrix.target }}
+            if [ -n "$FEATURES" ]; then
+              cargo build --release --locked --features "${FEATURES}" --target ${{ matrix.target }}
+            else
+              cargo build --release --locked --target ${{ matrix.target }}
+            fi
           fi
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang

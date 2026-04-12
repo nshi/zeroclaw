@@ -1538,7 +1538,6 @@ if [[ "$SKIP_BUILD" == false ]]; then
     armv7l|armv6l|armhf)
       step_dot "32-bit ARM detected ($_build_arch) — disabling prometheus (requires 64-bit atomics)"
       CARGO_NO_DEFAULT_FEATURES=true
-      append_cargo_feature "channel-nostr"
       append_cargo_feature "skill-creation"
       ;;
   esac

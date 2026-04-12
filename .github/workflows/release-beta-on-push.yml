@@ -16,7 +16,7 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  RELEASE_CARGO_FEATURES: channel-matrix,channel-lark,whatsapp-web
+  RELEASE_CARGO_FEATURES: ""
 
 jobs:
   version:
@@ -252,7 +252,12 @@ jobs:
           if [ -n "${{ matrix.linker_env || '' }}" ] && [ -n "${{ matrix.linker || '' }}" ]; then
             export "${{ matrix.linker_env }}=${{ matrix.linker }}"
           fi
-          cargo build --release --locked --features "${{ env.RELEASE_CARGO_FEATURES }}" --target ${{ matrix.target }}
+          FEATURES="${{ env.RELEASE_CARGO_FEATURES }}"
+          if [ -n "$FEATURES" ]; then
+            cargo build --release --locked --features "${FEATURES}" --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"

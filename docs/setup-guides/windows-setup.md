@@ -33,7 +33,7 @@ scoop install mentat
 
 ```cmd
 rustup target add x86_64-pc-windows-msvc
-cargo build --release --locked --features channel-matrix,channel-lark --target x86_64-pc-windows-msvc
+cargo build --release --locked --target x86_64-pc-windows-msvc
 copy target\x86_64-pc-windows-msvc\release\mentat.exe %USERPROFILE%\.mentat\bin\
 ```
 
@@ -62,20 +62,16 @@ Mentat uses Cargo feature flags to control which integrations are compiled in:
 
 | Feature | Description | Default? |
 |---------|-------------|----------|
-| `channel-lark` | Lark/Feishu messaging | Yes |
-| `channel-nostr` | Nostr protocol | Yes |
 | `observability-prometheus` | Prometheus metrics | Yes |
 | `skill-creation` | Auto skill creation | Yes |
-| `channel-matrix` | Matrix protocol | No |
 | `browser-native` | Headless browser | No |
-| `hardware` | USB device support | No |
 | `rag-pdf` | PDF extraction for RAG | No |
 | `observability-otel` | OpenTelemetry | No |
 
 To build with specific features:
 
 ```cmd
-cargo build --release --locked --features channel-matrix,channel-lark --target x86_64-pc-windows-msvc
+cargo build --release --locked --features browser-native,rag-pdf --target x86_64-pc-windows-msvc
 ```
 
 ## Post-Installation
@@ -96,14 +92,6 @@ Install Visual Studio Build Tools with the C++ workload. The MSVC linker is requ
 ### `cargo build` runs out of memory
 
 Source builds need at least 2 GB free RAM. Use `setup.bat --prebuilt` to download a pre-compiled binary instead.
-
-### Feishu/Lark not available
-
-Feishu and Lark are the same platform. Build with the `channel-lark` feature:
-
-```cmd
-cargo build --release --locked --features channel-lark --target x86_64-pc-windows-msvc
-```
 
 ### Web dashboard missing
 

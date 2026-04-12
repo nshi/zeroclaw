@@ -105,16 +105,10 @@ cargo check
 
 This uses the lean default feature set and can significantly reduce compile time.
 
-To build with Matrix support explicitly enabled:
+To build with additional features:
 
 ```bash
-cargo check --features channel-matrix
-```
-
-To build with Matrix + Lark + hardware support:
-
-```bash
-cargo check --features hardware,channel-matrix,channel-lark
+cargo check --features browser-native,rag-pdf
 ```
 
 Lock-contention mitigation:
