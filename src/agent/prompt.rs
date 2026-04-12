@@ -148,13 +148,13 @@ pub fn build_tool_hint(tool_specs: &[crate::tools::ToolSpec], user_message: &str
 
     // Filter out short words and common stop words to reduce false positives.
     const STOP_WORDS: &[&str] = &[
-        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was", "one",
-        "our", "out", "has", "its", "let", "may", "who", "did", "get", "got", "him", "his", "how",
-        "its", "may", "new", "now", "old", "see", "way", "use", "set", "run", "any", "few", "too",
-        "yet", "also", "been", "call", "each", "from", "have", "into", "just", "like", "make",
-        "many", "more", "most", "must", "need", "only", "over", "such", "take", "than", "that",
-        "them", "then", "they", "this", "very", "want", "well", "what", "when", "will", "with",
-        "your", "does", "done", "some", "were",
+        "all", "also", "and", "any", "are", "been", "but", "call", "can", "did", "does", "done",
+        "each", "few", "for", "from", "get", "got", "had", "has", "her", "him", "his", "how",
+        "into", "its", "just", "let", "like", "make", "many", "may", "more", "most", "must",
+        "need", "new", "not", "now", "old", "one", "only", "our", "out", "over", "run", "see",
+        "set", "some", "such", "take", "than", "that", "the", "them", "then", "they", "this",
+        "too", "use", "very", "want", "was", "way", "well", "were", "what", "when", "who", "will",
+        "with", "yet", "you", "your",
     ];
     let terms: Vec<String> = user_message
         .split_whitespace()

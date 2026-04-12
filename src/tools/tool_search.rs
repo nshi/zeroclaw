@@ -50,8 +50,6 @@ pub struct ToolSearchTool {
     deferred: Option<DeferredMcpToolSet>,
     activated: Option<Arc<Mutex<ActivatedToolSet>>>,
     builtin_specs: Vec<ToolSpec>,
-    /// Pre-lowercased `"name description"` per spec, for keyword matching.
-    builtin_haystacks: Vec<String>,
 }
 
 impl ToolSearchTool {
@@ -61,38 +59,21 @@ impl ToolSearchTool {
         activated: Arc<Mutex<ActivatedToolSet>>,
         builtin_specs: Vec<ToolSpec>,
     ) -> Self {
-        let builtin_haystacks = build_haystacks(&builtin_specs);
         Self {
             deferred: Some(deferred),
             activated: Some(activated),
             builtin_specs,
-            builtin_haystacks,
         }
     }
 
     /// Create with only built-in tool specs (no MCP deferred tools).
     pub fn builtin_only(builtin_specs: Vec<ToolSpec>) -> Self {
-        let builtin_haystacks = build_haystacks(&builtin_specs);
         Self {
             deferred: None,
             activated: None,
             builtin_specs,
-            builtin_haystacks,
         }
     }
-}
-
-fn build_haystacks(specs: &[ToolSpec]) -> Vec<String> {
-    specs
-        .iter()
-        .map(|s| {
-            format!(
-                "{} {}",
-                s.name.to_ascii_lowercase(),
-                s.description.to_ascii_lowercase()
-            )
-        })
-        .collect()
 }
 
 /// Keyword-search tool specs by matching query terms against `"name description"`
