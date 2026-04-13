@@ -1,8 +1,8 @@
+use mentat::channels::telegram::TelegramChannel;
+use mentat::channels::traits::Channel;
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use mentat::channels::telegram::TelegramChannel;
-use mentat::channels::traits::Channel;
 
 fn test_channel(mock_url: &str) -> TelegramChannel {
     TelegramChannel::new("TEST_TOKEN".into(), vec!["*".into()], false)

@@ -73,10 +73,7 @@ mod tests {
 
     #[test]
     fn tooltip_connected_variants() {
-        assert_eq!(
-            tooltip_for_state(true, AgentStatus::Idle),
-            "Mentat — Idle"
-        );
+        assert_eq!(tooltip_for_state(true, AgentStatus::Idle), "Mentat — Idle");
         assert_eq!(
             tooltip_for_state(true, AgentStatus::Working),
             "Mentat — Working"

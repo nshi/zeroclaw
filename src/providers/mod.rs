@@ -414,8 +414,9 @@ fn create_provider_with_url_and_options(
             // *some* credential; llama-server ignores it unless started with
             // `--api-key`. Placeholder keeps keyless local setups working.
             let llamacpp_key = key.unwrap_or("llamacpp-no-auth");
-            let mut p = openai::OpenAiProvider::with_base_url(Some(&resolved_url), Some(llamacpp_key))
-                .with_timeout_secs(options.provider_timeout_secs);
+            let mut p =
+                openai::OpenAiProvider::with_base_url(Some(&resolved_url), Some(llamacpp_key))
+                    .with_timeout_secs(options.provider_timeout_secs);
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_tokens(Some(mt));
             }
@@ -745,11 +746,7 @@ mod tests {
 
     #[test]
     fn factory_llamacpp_honors_explicit_api_url() {
-        let p = create_provider_with_url(
-            "llamacpp",
-            None,
-            Some("http://127.0.0.1:9090/v1"),
-        );
+        let p = create_provider_with_url("llamacpp", None, Some("http://127.0.0.1:9090/v1"));
         assert!(p.is_ok());
     }
 
@@ -784,7 +781,10 @@ mod tests {
 
         let options = provider_runtime_options_from_config(&cfg);
         assert_eq!(
-            options.model_provider_base_urls.get("llamacpp").map(String::as_str),
+            options
+                .model_provider_base_urls
+                .get("llamacpp")
+                .map(String::as_str),
             Some("http://127.0.0.1:9090/v1")
         );
     }
