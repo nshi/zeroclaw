@@ -3610,10 +3610,8 @@ fn print_summary(config: &Config) {
             );
             println!(
                 "       {}",
-                style(
-                    "or: mentat auth paste-token --provider anthropic --auth-kind authorization"
-                )
-                .yellow()
+                style("or: mentat auth paste-token --provider anthropic --auth-kind authorization")
+                    .yellow()
             );
         } else {
             let env_var = provider_env_var(provider);
@@ -3909,10 +3907,8 @@ mod tests {
         let workspace_dir = workspace_root.join("workspace");
         let expected_config_path = workspace_root.join(".mentat").join("config.toml");
 
-        let _workspace_env = EnvVarGuard::set(
-            "MENTAT_WORKSPACE",
-            workspace_dir.to_string_lossy().as_ref(),
-        );
+        let _workspace_env =
+            EnvVarGuard::set("MENTAT_WORKSPACE", workspace_dir.to_string_lossy().as_ref());
         let _config_env = EnvVarGuard::unset("MENTAT_CONFIG_DIR");
 
         let config = Box::pin(run_quick_setup_with_home(
@@ -3937,9 +3933,7 @@ mod tests {
             Some("/opt/homebrew")
         );
         assert_eq!(
-            homebrew_prefix_for_exe(Path::new(
-                "/opt/homebrew/Cellar/mentat/0.5.0/bin/mentat",
-            )),
+            homebrew_prefix_for_exe(Path::new("/opt/homebrew/Cellar/mentat/0.5.0/bin/mentat",)),
             Some("/opt/homebrew")
         );
         assert_eq!(

@@ -2,9 +2,9 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use mentat::tools::{Tool, ToolResult};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use mentat::tools::{Tool, ToolResult};
 
 /// Simple tool that echoes its input argument.
 pub struct EchoTool;

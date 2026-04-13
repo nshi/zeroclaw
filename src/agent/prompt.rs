@@ -372,9 +372,7 @@ impl PromptSection for ToolHonestySection {
 /// Truncate a description to its first sentence for use in behavioral hints.
 fn first_sentence(desc: &str) -> &str {
     // Split on ". " to find the first sentence boundary, keeping the period.
-    desc.find(". ")
-        .map(|i| &desc[..=i])
-        .unwrap_or(desc)
+    desc.find(". ").map(|i| &desc[..=i]).unwrap_or(desc)
 }
 
 impl PromptSection for ToolsSection {
@@ -1626,13 +1624,7 @@ mod tests {
             super::first_sentence("First sentence. Second sentence. Third."),
             "First sentence."
         );
-        assert_eq!(
-            super::first_sentence("Only sentence"),
-            "Only sentence"
-        );
-        assert_eq!(
-            super::first_sentence("Has period."),
-            "Has period."
-        );
+        assert_eq!(super::first_sentence("Only sentence"), "Only sentence");
+        assert_eq!(super::first_sentence("Has period."), "Has period.");
     }
 }

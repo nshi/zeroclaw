@@ -2728,9 +2728,8 @@ mod tests {
 
     #[test]
     fn agent_command_parses_session_state_file() {
-        let cli =
-            Cli::try_parse_from(["mentat", "agent", "--session-state-file", "session.json"])
-                .expect("agent command with session state file should parse");
+        let cli = Cli::try_parse_from(["mentat", "agent", "--session-state-file", "session.json"])
+            .expect("agent command with session state file should parse");
 
         match cli.command {
             Commands::Agent {

@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
 use mentat::agent::agent::Agent;
 use mentat::agent::dispatcher::{NativeToolDispatcher, XmlToolDispatcher};
 use mentat::agent::memory_loader::MemoryLoader;
@@ -12,6 +11,7 @@ use mentat::memory::Memory;
 use mentat::observability::{NoopObserver, Observer};
 use mentat::providers::{ChatResponse, Provider, ToolCall};
 use mentat::tools::Tool;
+use std::sync::Arc;
 
 /// Create an in-memory "none" backend for tests.
 pub fn make_memory() -> Arc<dyn Memory> {

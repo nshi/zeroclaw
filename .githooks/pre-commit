@@ -1,8 +1,24 @@
 #!/usr/bin/env bash
+#
+# pre-commit hook — fast gates only: secret scan + rustfmt check on staged files.
+# Heavier checks (clippy, tests) live in pre-push.
+# Install:  git config core.hooksPath .githooks
+# Skip:     git commit --no-verify
+
 set -euo pipefail
 
 if command -v gitleaks >/dev/null 2>&1; then
   gitleaks protect --staged --redact
 else
   echo "warning: gitleaks not found; skipping staged secret scan" >&2
+fi
+
+# rustfmt only the staged Rust files — keeps the hook fast on large workspaces.
+mapfile -t staged_rs < <(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.rs$' || true)
+if [ "${#staged_rs[@]}" -gt 0 ]; then
+  echo "==> pre-commit: rustfmt --check on ${#staged_rs[@]} staged Rust file(s)"
+  if ! rustfmt --check --edition 2024 "${staged_rs[@]}"; then
+    echo "FAIL: rustfmt found issues. Run 'cargo fmt --all' (or rustfmt on the listed files) to fix." >&2
+    exit 1
+  fi
 fi
