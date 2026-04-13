@@ -369,6 +369,14 @@ impl PromptSection for ToolHonestySection {
     }
 }
 
+/// Truncate a description to its first sentence for use in behavioral hints.
+fn first_sentence(desc: &str) -> &str {
+    // Split on ". " to find the first sentence boundary, keeping the period.
+    desc.find(". ")
+        .map(|i| &desc[..=i])
+        .unwrap_or(desc)
+}
+
 impl PromptSection for ToolsSection {
     fn name(&self) -> &str {
         "tools"
@@ -396,6 +404,17 @@ impl PromptSection for ToolsSection {
             let names: Vec<&str> = ctx.tools.iter().map(|t| t.name()).collect();
             out.push_str(&names.join(", "));
             out.push('\n');
+        } else if ctx.native_tools {
+            // Native tool calling: schemas are delivered via the API's tools
+            // parameter. The system prompt only needs behavioral hints — one
+            // line per tool with the first sentence of the description.
+            for tool in ctx.tools {
+                let desc = ctx
+                    .tool_descriptions
+                    .and_then(|td: &ToolDescriptions| td.get(tool.name()))
+                    .unwrap_or_else(|| tool.description());
+                let _ = writeln!(out, "- **{}**: {}", tool.name(), first_sentence(desc));
+            }
         } else {
             for tool in ctx.tools {
                 let desc = ctx
@@ -1573,5 +1592,47 @@ mod tests {
         let ctx = make_ctx(&tools);
         let output = ToolUseProtocolSection.build(&ctx).unwrap();
         assert!(!output.contains("More tools exist"));
+    }
+
+    #[test]
+    fn tools_section_native_tools_omits_parameters() {
+        let tools: Vec<Box<dyn Tool>> =
+            vec![make_named_tool("shell"), make_named_tool("file_read")];
+        let mut ctx = make_ctx(&tools);
+        ctx.native_tools = true;
+        let output = ToolsSection.build(&ctx).unwrap();
+        assert!(output.contains("**shell**:"));
+        assert!(output.contains("**file_read**:"));
+        assert!(
+            !output.contains("Parameters:"),
+            "native_tools should omit parameter schemas from system prompt"
+        );
+    }
+
+    #[test]
+    fn tools_section_native_tools_uses_first_sentence() {
+        let tools: Vec<Box<dyn Tool>> = vec![make_named_tool("shell")];
+        let mut ctx = make_ctx(&tools);
+        ctx.native_tools = true;
+        let output = ToolsSection.build(&ctx).unwrap();
+        // first_sentence should truncate at ". " boundary
+        assert!(!output.contains("Parameters:"));
+        assert!(output.contains("## Tools"));
+    }
+
+    #[test]
+    fn first_sentence_truncation() {
+        assert_eq!(
+            super::first_sentence("First sentence. Second sentence. Third."),
+            "First sentence."
+        );
+        assert_eq!(
+            super::first_sentence("Only sentence"),
+            "Only sentence"
+        );
+        assert_eq!(
+            super::first_sentence("Has period."),
+            "Has period."
+        );
     }
 }

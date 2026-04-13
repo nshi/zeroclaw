@@ -106,17 +106,29 @@ pub(crate) fn filter_tool_specs_for_turn(
         return tool_specs;
     }
 
+    let any_filter_builtins = groups.iter().any(|g| g.filter_builtins);
     let msg_lower = user_message.to_ascii_lowercase();
 
     tool_specs
         .into_iter()
         .filter(|spec| {
-            // Built-in tools always pass through.
-            if !spec.name.starts_with("mcp_") {
+            let is_builtin = !spec.name.starts_with("mcp_");
+
+            // Built-in tools pass through unless at least one group opts
+            // into filtering builtins.
+            if is_builtin && !any_filter_builtins {
                 return true;
             }
-            // MCP tool: include if any active group matches.
+
+            // Include if any active group matches this tool.
             groups.iter().any(|group| {
+                // A group with filter_builtins=false cannot filter built-in
+                // tools, but it can still include them (they already passed
+                // through above when no group opts in). When builtins ARE
+                // filtered, only groups that opted in can match them.
+                if is_builtin && !group.filter_builtins {
+                    return false;
+                }
                 let pattern_matches = group.tools.iter().any(|pat| glob_match(pat, &spec.name));
                 if !pattern_matches {
                     return false;
@@ -158,11 +170,15 @@ pub(crate) fn filter_by_allowed_tools(
     }
 }
 
-/// Computes the list of MCP tool names that should be excluded for a given turn
-/// based on `tool_filter_groups` and the user message.
+/// Computes tool names that should be excluded for a given turn based on
+/// `tool_filter_groups` and the user message.
+///
+/// By default only MCP tools are subject to filtering. When any group sets
+/// `filter_builtins = true`, built-in tools that don't match an active group
+/// are also excluded.
 ///
 /// Returns an empty `Vec` when `groups` is empty (no filtering).
-fn compute_excluded_mcp_tools(
+fn compute_excluded_tools(
     tools_registry: &[Box<dyn Tool>],
     groups: &[crate::config::schema::ToolFilterGroup],
     user_message: &str,
@@ -170,6 +186,7 @@ fn compute_excluded_mcp_tools(
     if groups.is_empty() {
         return Vec::new();
     }
+    let any_filter_builtins = groups.iter().any(|g| g.filter_builtins);
     let filtered_specs = filter_tool_specs_for_turn(
         tools_registry.iter().map(|t| t.spec()).collect(),
         groups,
@@ -178,7 +195,14 @@ fn compute_excluded_mcp_tools(
     let included: HashSet<&str> = filtered_specs.iter().map(|s| s.name.as_str()).collect();
     tools_registry
         .iter()
-        .filter(|t| t.name().starts_with("mcp_") && !included.contains(t.name()))
+        .filter(|t| {
+            let dominated = if t.name().starts_with("mcp_") {
+                true
+            } else {
+                any_filter_builtins
+            };
+            dominated && !included.contains(t.name())
+        })
         .map(|t| t.name().to_string())
         .collect()
 }
@@ -3788,7 +3812,7 @@ pub async fn run(
         }
 
         // Compute per-turn excluded MCP tools from tool_filter_groups.
-        let excluded_tools = compute_excluded_mcp_tools(
+        let excluded_tools = compute_excluded_tools(
             &tools_registry,
             &config.agent.tool_filter_groups,
             &effective_msg,
@@ -4042,7 +4066,7 @@ pub async fn run(
             history.push(ChatMessage::user(&enriched));
 
             // Compute per-turn excluded MCP tools from tool_filter_groups.
-            let excluded_tools = compute_excluded_mcp_tools(
+            let excluded_tools = compute_excluded_tools(
                 &tools_registry,
                 &config.agent.tool_filter_groups,
                 &effective_input,
@@ -4480,7 +4504,7 @@ pub async fn process_message(
         ChatMessage::system(&system_prompt),
         ChatMessage::user(&enriched),
     ];
-    let mut excluded_tools = compute_excluded_mcp_tools(
+    let mut excluded_tools = compute_excluded_tools(
         &tools_registry,
         &config.agent.tool_filter_groups,
         effective_msg_ref,
@@ -8913,6 +8937,97 @@ Let me check the result."#;
         }];
         let result = filter_tool_specs_for_turn(specs, &groups, "BROWSE the site");
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn filter_tool_specs_filter_builtins_always_group() {
+        use crate::config::schema::{ToolFilterGroup, ToolFilterGroupMode};
+
+        let specs = vec![
+            make_spec("shell"),
+            make_spec("file_read"),
+            make_spec("git_operations"),
+            make_spec("mcp_browser_navigate"),
+        ];
+        let groups = vec![ToolFilterGroup {
+            mode: ToolFilterGroupMode::Always,
+            tools: vec!["shell".into(), "file_*".into()],
+            keywords: vec![],
+            filter_builtins: true,
+        }];
+        let result = filter_tool_specs_for_turn(specs, &groups, "anything");
+        let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"shell"));
+        assert!(names.contains(&"file_read"));
+        assert!(!names.contains(&"git_operations"), "unmatched builtin should be excluded");
+        assert!(!names.contains(&"mcp_browser_navigate"), "unmatched MCP should be excluded");
+    }
+
+    #[test]
+    fn filter_tool_specs_filter_builtins_dynamic_group() {
+        use crate::config::schema::{ToolFilterGroup, ToolFilterGroupMode};
+
+        let specs = vec![
+            make_spec("shell"),
+            make_spec("git_operations"),
+        ];
+        let groups = vec![
+            ToolFilterGroup {
+                mode: ToolFilterGroupMode::Always,
+                tools: vec!["shell".into()],
+                keywords: vec![],
+                filter_builtins: true,
+            },
+            ToolFilterGroup {
+                mode: ToolFilterGroupMode::Dynamic,
+                tools: vec!["git_*".into()],
+                keywords: vec!["git".into(), "commit".into()],
+                filter_builtins: true,
+            },
+        ];
+        // No keyword match → git_operations excluded
+        let result = filter_tool_specs_for_turn(specs.clone(), &groups, "read a file");
+        let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"shell"));
+        assert!(!names.contains(&"git_operations"));
+
+        // Keyword match → git_operations included
+        let result = filter_tool_specs_for_turn(specs, &groups, "git commit changes");
+        let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"shell"));
+        assert!(names.contains(&"git_operations"));
+    }
+
+    #[test]
+    fn filter_tool_specs_mixed_builtin_filtering_groups() {
+        use crate::config::schema::{ToolFilterGroup, ToolFilterGroupMode};
+
+        // One group filters builtins, one doesn't → builtins ARE filtered
+        // because any_filter_builtins becomes true.
+        let specs = vec![
+            make_spec("shell"),
+            make_spec("calculator"),
+            make_spec("mcp_fs_read"),
+        ];
+        let groups = vec![
+            ToolFilterGroup {
+                mode: ToolFilterGroupMode::Always,
+                tools: vec!["shell".into()],
+                keywords: vec![],
+                filter_builtins: true,
+            },
+            ToolFilterGroup {
+                mode: ToolFilterGroupMode::Always,
+                tools: vec!["mcp_fs_*".into()],
+                keywords: vec![],
+                filter_builtins: false,
+            },
+        ];
+        let result = filter_tool_specs_for_turn(specs, &groups, "anything");
+        let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"shell"), "matched by filter_builtins group");
+        assert!(names.contains(&"mcp_fs_read"), "matched by MCP group");
+        assert!(!names.contains(&"calculator"), "unmatched builtin excluded");
     }
 
     // ── Token-based compaction tests ──────────────────────────

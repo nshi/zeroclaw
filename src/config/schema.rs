@@ -1088,24 +1088,25 @@ pub enum ToolFilterGroupMode {
     Dynamic,
 }
 
-/// A named group of MCP tool patterns with an activation mode.
+/// A named group of tool patterns with an activation mode.
 ///
-/// Each group lists glob patterns for MCP tool names (prefix `mcp_`) and an
-/// optional set of keywords that trigger inclusion in `dynamic` mode.
-/// Built-in (non-MCP) tools always pass through and are never affected by
-/// `tool_filter_groups`.
+/// Each group lists glob patterns for tool names and an optional set of
+/// keywords that trigger inclusion in `dynamic` mode. By default only MCP
+/// tools (prefix `mcp_`) are filtered; set `filter_builtins = true` to also
+/// control which built-in tools are included per turn.
 ///
 /// # Example
 /// ```toml
 /// [[agent.tool_filter_groups]]
 /// mode = "always"
-/// tools = ["mcp_filesystem_*"]
-/// keywords = []
+/// tools = ["shell", "file_*", "glob_search", "content_search"]
+/// filter_builtins = true
 ///
 /// [[agent.tool_filter_groups]]
 /// mode = "dynamic"
-/// tools = ["mcp_browser_*"]
-/// keywords = ["browse", "website", "url", "search"]
+/// tools = ["git_operations", "delegate"]
+/// keywords = ["git", "commit", "delegate", "agent"]
+/// filter_builtins = true
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ToolFilterGroup {
