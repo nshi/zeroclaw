@@ -1200,7 +1200,7 @@ async fn handle_webhook(
     let message = &webhook_body.message;
     let session_id = webhook_session_id(&headers);
 
-    if state.auto_save && !memory::should_skip_autosave_content(message) {
+    if state.auto_save && !memory::is_synthetic_trigger_content(message) {
         let key = webhook_memory_key();
         let _ = state
             .mem

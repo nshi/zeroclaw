@@ -375,7 +375,7 @@ async fn build_context(
                 if memory::is_assistant_autosave_key(&entry.key) {
                     continue;
                 }
-                if memory::should_skip_autosave_content(&entry.content) {
+                if memory::is_synthetic_trigger_content(&entry.content) {
                     continue;
                 }
                 // Skip entries containing tool_result blocks — they can leak
@@ -3770,7 +3770,7 @@ pub async fn run(
         // Auto-save user message to memory (skip short/trivial messages)
         if config.memory.auto_save
             && effective_msg.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS
-            && !memory::should_skip_autosave_content(&effective_msg)
+            && !memory::is_synthetic_trigger_content(&effective_msg)
         {
             let user_key = autosave_memory_key("user_msg");
             let _ = mem
@@ -3783,14 +3783,18 @@ pub async fn run(
                 .await;
         }
 
-        // Inject memory context into user message
-        let mem_context = build_context(
-            mem.as_ref(),
-            &effective_msg,
-            config.memory.min_relevance_score,
-            memory_session_id.as_deref(),
-        )
-        .await;
+        // Skip recall for synthetic triggers — rationale on the predicate.
+        let mem_context = if memory::is_synthetic_trigger_content(&effective_msg) {
+            String::new()
+        } else {
+            build_context(
+                mem.as_ref(),
+                &effective_msg,
+                config.memory.min_relevance_score,
+                memory_session_id.as_deref(),
+            )
+            .await
+        };
         let skill_hint = crate::agent::prompt::build_skill_hint(&skills, &effective_msg);
         let loop_tool_specs: Vec<crate::tools::ToolSpec> =
             tools_registry.iter().map(|t| t.spec()).collect();
@@ -4034,7 +4038,7 @@ pub async fn run(
             // Auto-save conversation turns (skip short/trivial messages)
             if config.memory.auto_save
                 && effective_input.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS
-                && !memory::should_skip_autosave_content(&effective_input)
+                && !memory::is_synthetic_trigger_content(&effective_input)
             {
                 let user_key = autosave_memory_key("user_msg");
                 let _ = mem
