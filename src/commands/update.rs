@@ -4,10 +4,8 @@ use anyhow::{Context, Result, bail};
 use std::path::Path;
 use tracing::{info, warn};
 
-const GITHUB_RELEASES_LATEST_URL: &str =
-    "https://api.github.com/repos/nshi/mentat/releases/latest";
-const GITHUB_RELEASES_TAG_URL: &str =
-    "https://api.github.com/repos/nshi/mentat/releases/tags";
+const GITHUB_RELEASES_LATEST_URL: &str = "https://api.github.com/repos/nshi/mentat/releases/latest";
+const GITHUB_RELEASES_TAG_URL: &str = "https://api.github.com/repos/nshi/mentat/releases/tags";
 
 #[derive(Debug)]
 pub struct UpdateInfo {

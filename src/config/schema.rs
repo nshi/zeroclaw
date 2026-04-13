@@ -7243,9 +7243,7 @@ pub(crate) fn resolve_config_dir_for_workspace(workspace_dir: &Path) -> (PathBuf
         );
     }
 
-    let legacy_config_dir = workspace_dir
-        .parent()
-        .map(|parent| parent.join(".mentat"));
+    let legacy_config_dir = workspace_dir.parent().map(|parent| parent.join(".mentat"));
     if let Some(legacy_dir) = legacy_config_dir {
         if legacy_dir.join("config.toml").exists() {
             return (legacy_dir, workspace_config_dir);
@@ -8646,8 +8644,7 @@ impl Config {
         }
 
         // Gateway host: MENTAT_GATEWAY_HOST or HOST
-        if let Ok(host) = std::env::var("MENTAT_GATEWAY_HOST").or_else(|_| std::env::var("HOST"))
-        {
+        if let Ok(host) = std::env::var("MENTAT_GATEWAY_HOST").or_else(|_| std::env::var("HOST")) {
             if !host.is_empty() {
                 self.gateway.host = host;
             }
@@ -8678,9 +8675,7 @@ impl Config {
                     );
                 }
                 Err(_) => {
-                    tracing::warn!(
-                        "Ignoring MENTAT_TEMPERATURE={temp_str:?}: not a valid number"
-                    );
+                    tracing::warn!("Ignoring MENTAT_TEMPERATURE={temp_str:?}: not a valid number");
                 }
             }
         }
@@ -9979,8 +9974,7 @@ provider_timeout_secs = 300
 
     #[test]
     async fn parse_extra_headers_env_with_url_value() {
-        let headers =
-            parse_extra_headers_env("HTTP-Referer:https://github.com/nshi/mentat");
+        let headers = parse_extra_headers_env("HTTP-Referer:https://github.com/nshi/mentat");
         assert_eq!(headers.len(), 1);
         // Only splits on first colon, preserving URL colons in value
         assert_eq!(headers[0].0, "HTTP-Referer");
@@ -10405,8 +10399,7 @@ default_temperature = 0.7
 
     #[tokio::test]
     async fn config_save_atomic_cleanup() {
-        let dir =
-            std::env::temp_dir().join(format!("mentat_test_config_{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("mentat_test_config_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).await.unwrap();
 
         let config_path = dir.join("config.toml");
@@ -12055,10 +12048,7 @@ default_model = "persisted-profile"
         unsafe { std::env::set_var("MENTAT_HTTP_PROXY", "http://127.0.0.1:7890") };
         // SAFETY: test-only, single-threaded test runner.
         unsafe {
-            std::env::set_var(
-                "MENTAT_PROXY_SERVICES",
-                "provider.openai, tool.web_search",
-            );
+            std::env::set_var("MENTAT_PROXY_SERVICES", "provider.openai, tool.web_search");
         }
         // SAFETY: test-only, single-threaded test runner.
         unsafe { std::env::set_var("MENTAT_PROXY_SCOPE", "services") };
@@ -12481,10 +12471,8 @@ require_otp_to_resume = true
 
     #[tokio::test]
     async fn channel_secret_telegram_bot_token_roundtrip() {
-        let dir = std::env::temp_dir().join(format!(
-            "mentat_test_tg_bot_token_{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("mentat_test_tg_bot_token_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).await.unwrap();
 
         let plaintext_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11";
@@ -12876,10 +12864,8 @@ require_otp_to_resume = true
 
     #[tokio::test]
     async fn nevis_client_secret_encrypt_decrypt_roundtrip() {
-        let dir = std::env::temp_dir().join(format!(
-            "mentat_test_nevis_secret_{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("mentat_test_nevis_secret_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).await.unwrap();
 
         let plaintext_secret = "nevis-test-client-secret-value";

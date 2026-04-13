@@ -2920,7 +2920,9 @@ pub(crate) async fn run_tool_call_loop(
             if let Some(saved) = pre_nudge_display_text.take() {
                 tracing::info!("Post-nudge response empty; falling back to pre-nudge text");
                 display_text = saved;
-                response_text = pre_nudge_response_text.take().unwrap_or(display_text.clone());
+                response_text = pre_nudge_response_text
+                    .take()
+                    .unwrap_or(display_text.clone());
             }
         }
 
@@ -8963,18 +8965,21 @@ Let me check the result."#;
         let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"shell"));
         assert!(names.contains(&"file_read"));
-        assert!(!names.contains(&"git_operations"), "unmatched builtin should be excluded");
-        assert!(!names.contains(&"mcp_browser_navigate"), "unmatched MCP should be excluded");
+        assert!(
+            !names.contains(&"git_operations"),
+            "unmatched builtin should be excluded"
+        );
+        assert!(
+            !names.contains(&"mcp_browser_navigate"),
+            "unmatched MCP should be excluded"
+        );
     }
 
     #[test]
     fn filter_tool_specs_filter_builtins_dynamic_group() {
         use crate::config::schema::{ToolFilterGroup, ToolFilterGroupMode};
 
-        let specs = vec![
-            make_spec("shell"),
-            make_spec("git_operations"),
-        ];
+        let specs = vec![make_spec("shell"), make_spec("git_operations")];
         let groups = vec![
             ToolFilterGroup {
                 mode: ToolFilterGroupMode::Always,
