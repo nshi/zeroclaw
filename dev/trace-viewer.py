@@ -476,7 +476,9 @@ def format_turn(index: int, total: int, event: dict) -> str:
 
     event_id = event.get("id", "")
     id_suffix = f" ── {c(event_id, 'dim')}" if event_id else ""
-    header = c(f"── Turn {index}/{total} ── ", "cyan") + etype_colored + c(f" ── {ts} ──", "cyan") + id_suffix
+    turn_id = event.get("turn_id", "")
+    tid_suffix = f" ── turn_id={c(turn_id, 'dim')}" if turn_id else ""
+    header = c(f"── Turn {index}/{total} ── ", "cyan") + etype_colored + c(f" ── {ts} ──", "cyan") + tid_suffix + id_suffix
     payload = event.get("payload") or {}
     renderer = _RENDERERS.get(etype, _render_generic)
     if etype in ("tool_call_result", "llm_request", "llm_response"):
