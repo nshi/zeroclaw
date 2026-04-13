@@ -1209,7 +1209,7 @@ fn should_skip_memory_context_entry(key: &str, content: &str) -> bool {
         return true;
     }
 
-    if memory::should_skip_autosave_content(content) {
+    if memory::is_synthetic_trigger_content(content) {
         return true;
     }
 
@@ -2404,7 +2404,7 @@ async fn process_channel_message(
     };
     if ctx.auto_save_memory
         && msg.content.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS
-        && !memory::should_skip_autosave_content(&msg.content)
+        && !memory::is_synthetic_trigger_content(&msg.content)
     {
         let autosave_key = conversation_memory_key(&msg);
         let _ = ctx

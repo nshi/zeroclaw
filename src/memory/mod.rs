@@ -99,16 +99,23 @@ pub fn is_assistant_autosave_key(key: &str) -> bool {
     normalized == "assistant_resp" || normalized.starts_with("assistant_resp_")
 }
 
-/// Filter known synthetic autosave noise patterns that should not be
-/// persisted as user conversation memories.
-pub fn should_skip_autosave_content(content: &str) -> bool {
+/// Marker prefix on user messages produced by the cron scheduler.
+/// Used both when the scheduler builds the prompt and when downstream
+/// memory code recognizes synthetic triggers.
+pub const CRON_MSG_PREFIX: &str = "[cron:";
+
+/// True for synthetic / non-conversational user messages (cron triggers,
+/// heartbeat tasks, distilled summaries) that should bypass memory writes
+/// AND memory recall — they are self-contained and recalling against them
+/// surfaces their own past runs as fake user intent.
+pub fn is_synthetic_trigger_content(content: &str) -> bool {
     let normalized = content.trim();
     if normalized.is_empty() {
         return true;
     }
 
     let lowered = normalized.to_ascii_lowercase();
-    lowered.starts_with("[cron:")
+    lowered.starts_with(CRON_MSG_PREFIX)
         || lowered.starts_with("[heartbeat task")
         || lowered.starts_with("[distilled_")
         || lowered.contains("distilled_index_sig:")
@@ -433,17 +440,17 @@ mod tests {
 
     #[test]
     fn autosave_content_filter_drops_cron_and_distilled_noise() {
-        assert!(should_skip_autosave_content("[cron:auto] patrol check"));
-        assert!(should_skip_autosave_content(
+        assert!(is_synthetic_trigger_content("[cron:auto] patrol check"));
+        assert!(is_synthetic_trigger_content(
             "[DISTILLED_MEMORY_CHUNK 1/2] DISTILLED_INDEX_SIG:abc123"
         ));
-        assert!(should_skip_autosave_content(
+        assert!(is_synthetic_trigger_content(
             "[Heartbeat Task | decision] Should I run tasks?"
         ));
-        assert!(should_skip_autosave_content(
+        assert!(is_synthetic_trigger_content(
             "[Heartbeat Task | high] Execute scheduled patrol"
         ));
-        assert!(!should_skip_autosave_content(
+        assert!(!is_synthetic_trigger_content(
             "User prefers concise answers."
         ));
     }
