@@ -11,6 +11,10 @@ pub struct OpenAiProvider {
     base_url: String,
     credential: Option<String>,
     max_tokens: Option<u32>,
+    /// HTTP request timeout in seconds. `None` uses the built-in 120s default,
+    /// which is appropriate for hosted OpenAI but too short for slow local
+    /// backends (e.g. llama.cpp running large models on CPU).
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -189,12 +193,19 @@ impl OpenAiProvider {
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             credential: credential.map(ToString::to_string),
             max_tokens: None,
+            timeout_secs: None,
         }
     }
 
     /// Set the maximum output tokens for API requests.
     pub fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    /// Override [`Self::timeout_secs`]. `None` keeps the built-in default.
+    pub fn with_timeout_secs(mut self, timeout_secs: Option<u64>) -> Self {
+        self.timeout_secs = timeout_secs;
         self
     }
 
@@ -344,7 +355,8 @@ impl OpenAiProvider {
     }
 
     fn http_client(&self) -> Client {
-        crate::config::build_runtime_proxy_client_with_timeouts("provider.openai", 120, 10)
+        let timeout = self.timeout_secs.unwrap_or(120);
+        crate::config::build_runtime_proxy_client_with_timeouts("provider.openai", timeout, 10)
     }
 }
 

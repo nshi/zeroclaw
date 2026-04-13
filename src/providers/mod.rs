@@ -56,6 +56,12 @@ pub struct ProviderRuntimeOptions {
     /// Maximum output tokens for LLM provider API requests.
     /// `None` uses the provider's built-in default.
     pub provider_max_tokens: Option<u32>,
+    /// Per-provider base URL overrides sourced from `[model_providers.<name>]`
+    /// config tables. Consulted when constructing providers (e.g. `llamacpp`)
+    /// that accept an OpenAI-compatible endpoint, allowing a route to target a
+    /// non-primary provider at a custom URL without threading extra arguments
+    /// through every factory call site.
+    pub model_provider_base_urls: std::collections::HashMap<String, String>,
 }
 
 impl Default for ProviderRuntimeOptions {
@@ -71,6 +77,7 @@ impl Default for ProviderRuntimeOptions {
             extra_headers: std::collections::HashMap::new(),
             api_path: None,
             provider_max_tokens: None,
+            model_provider_base_urls: std::collections::HashMap::new(),
         }
     }
 }
@@ -89,6 +96,16 @@ pub fn provider_runtime_options_from_config(
         extra_headers: config.extra_headers.clone(),
         api_path: config.api_path.clone(),
         provider_max_tokens: config.provider_max_tokens,
+        model_provider_base_urls: config
+            .model_providers
+            .iter()
+            .filter_map(|(name, profile)| {
+                profile
+                    .base_url
+                    .as_ref()
+                    .map(|url| (name.clone(), url.clone()))
+            })
+            .collect(),
     }
 }
 
@@ -211,6 +228,7 @@ fn resolve_provider_credential(name: &str, credential_override: Option<&str>) ->
         "openrouter" => vec!["OPENROUTER_API_KEY"],
         "openai" => vec!["OPENAI_API_KEY"],
         "gemini" | "google" | "google-gemini" => vec!["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+        "llamacpp" => vec!["LLAMACPP_API_KEY"],
         _ => vec![],
     };
 
@@ -353,7 +371,8 @@ fn create_provider_with_url_and_options(
             Ok(Box::new(p))
         }
         "openai" => {
-            let mut p = openai::OpenAiProvider::with_base_url(api_url, key);
+            let mut p = openai::OpenAiProvider::with_base_url(api_url, key)
+                .with_timeout_secs(options.provider_timeout_secs);
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_tokens(Some(mt));
             }
@@ -374,6 +393,35 @@ fn create_provider_with_url_and_options(
             )))
         }
 
+        // ── llama.cpp server (OpenAI-compatible) ─────────────
+        //
+        // Resolution order for the base URL:
+        //   1. Explicit `api_url` argument (from top-level `api_url =` when
+        //      llamacpp is the primary provider).
+        //   2. `[model_providers.llamacpp].base_url` from config (for routed
+        //      usage where primary-provider URL is not forwarded).
+        //   3. Built-in default `http://localhost:8080/v1`.
+        //
+        // The transport is reused from `OpenAiProvider` because `llama-server`
+        // speaks the OpenAI `/v1/chat/completions` protocol. No API key is
+        // required unless `llama-server` was started with `--api-key`.
+        "llamacpp" => {
+            let resolved_url = api_url
+                .map(str::to_owned)
+                .or_else(|| options.model_provider_base_urls.get("llamacpp").cloned())
+                .unwrap_or_else(|| "http://localhost:8080/v1".to_string());
+            // The shared OpenAI transport refuses to send a request without
+            // *some* credential; llama-server ignores it unless started with
+            // `--api-key`. Placeholder keeps keyless local setups working.
+            let llamacpp_key = key.unwrap_or("llamacpp-no-auth");
+            let mut p = openai::OpenAiProvider::with_base_url(Some(&resolved_url), Some(llamacpp_key))
+                .with_timeout_secs(options.provider_timeout_secs);
+            if let Some(mt) = options.provider_max_tokens {
+                p = p.with_max_tokens(Some(mt));
+            }
+            Ok(Box::new(p))
+        }
+
         // ── Anthropic-compatible custom endpoints ───────────
         name if name.starts_with("anthropic-custom:") => {
             let base_url = parse_custom_provider_url(
@@ -388,7 +436,7 @@ fn create_provider_with_url_and_options(
         }
 
         _ => anyhow::bail!(
-            "Unknown provider: {name}. Supported providers: anthropic, openai, gemini, openrouter.\n\
+            "Unknown provider: {name}. Supported providers: anthropic, openai, gemini, openrouter, llamacpp.\n\
              Tip: Use \"anthropic-custom:https://your-api.com\" for Anthropic-compatible endpoints."
         ),
     }
@@ -685,6 +733,60 @@ mod tests {
         assert!(create_provider("google", Some("test-key")).is_ok());
         assert!(create_provider("google-gemini", Some("test-key")).is_ok());
         assert!(create_provider("gemini", None).is_ok());
+    }
+
+    // ── llama.cpp (OpenAI-compatible local server) ───────────
+
+    #[test]
+    fn factory_llamacpp_default_endpoint() {
+        // No api_url, no model_providers override → built-in default.
+        assert!(create_provider("llamacpp", None).is_ok());
+    }
+
+    #[test]
+    fn factory_llamacpp_honors_explicit_api_url() {
+        let p = create_provider_with_url(
+            "llamacpp",
+            None,
+            Some("http://127.0.0.1:9090/v1"),
+        );
+        assert!(p.is_ok());
+    }
+
+    #[test]
+    fn factory_llamacpp_honors_model_providers_base_url() {
+        // Simulate `[model_providers.llamacpp] base_url = "..."` without a
+        // top-level api_url, as happens when llamacpp is a routed (non-primary)
+        // provider.
+        let mut options = ProviderRuntimeOptions::default();
+        options.model_provider_base_urls.insert(
+            "llamacpp".to_string(),
+            "http://127.0.0.1:9090/v1".to_string(),
+        );
+        let p = create_provider_with_options("llamacpp", None, &options);
+        assert!(p.is_ok());
+    }
+
+    #[test]
+    fn provider_runtime_options_propagates_model_providers_base_urls() {
+        use crate::config::schema::ModelProviderConfig;
+        use std::collections::HashMap;
+
+        let mut cfg = crate::config::Config::default();
+        cfg.model_providers = HashMap::from([(
+            "llamacpp".to_string(),
+            ModelProviderConfig {
+                name: Some("llamacpp".to_string()),
+                base_url: Some("http://127.0.0.1:9090/v1".to_string()),
+                ..Default::default()
+            },
+        )]);
+
+        let options = provider_runtime_options_from_config(&cfg);
+        assert_eq!(
+            options.model_provider_base_urls.get("llamacpp").map(String::as_str),
+            Some("http://127.0.0.1:9090/v1")
+        );
     }
 
     // ── Anthropic-compatible custom endpoints ─────────────────
