@@ -43,7 +43,7 @@ const DEFAULT_MAX_TOOL_ITERATIONS: usize = 10;
 pub(crate) use super::history::{
     emergency_history_trim, estimate_history_tokens, fast_trim_tool_results,
     load_interactive_session_history, save_interactive_session_history, trim_history,
-    truncate_tool_result,
+    truncate_tool_message_content, truncate_tool_result,
 };
 
 /// Minimum user-message length (in chars) for auto-save to memory.
@@ -865,7 +865,7 @@ fn extract_json_values(input: &str) -> Vec<serde_json::Value> {
 }
 
 /// Find the end position of a JSON object by tracking balanced braces.
-fn find_json_end(input: &str) -> Option<usize> {
+pub(crate) fn find_json_end(input: &str) -> Option<usize> {
     let trimmed = input.trim_start();
     let offset = input.len() - trimmed.len();
 
@@ -2356,6 +2356,7 @@ pub(crate) async fn run_tool_call_loop(
     let mut tool_use_nudged = false;
     let mut pre_nudge_display_text: Option<String> = None;
     let mut pre_nudge_response_text: Option<String> = None;
+    let mut empty_response_retried = false;
 
     for iteration in 0..max_iterations {
         let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
@@ -2705,8 +2706,8 @@ pub(crate) async fn run_tool_call_loop(
                     .unwrap_or((None, None, None));
 
                 observer.record_event(&ObserverEvent::LlmResponse {
-                    provider: provider_name.to_string(),
-                    model: model.to_string(),
+                    provider: active_provider_name.to_string(),
+                    model: active_model.to_string(),
                     duration: llm_started_at.elapsed(),
                     success: true,
                     error_message: None,
@@ -2751,8 +2752,8 @@ pub(crate) async fn run_tool_call_loop(
                     runtime_trace::record_event(
                         "tool_call_parse_issue",
                         Some(channel_name),
-                        Some(provider_name),
-                        Some(model),
+                        Some(active_provider_name),
+                        Some(active_model),
                         Some(&turn_id),
                         Some(false),
                         Some(issue.as_str()),
@@ -2769,8 +2770,8 @@ pub(crate) async fn run_tool_call_loop(
                 runtime_trace::record_event(
                     "llm_response",
                     Some(channel_name),
-                    Some(provider_name),
-                    Some(model),
+                    Some(active_provider_name),
+                    Some(active_model),
                     Some(&turn_id),
                     Some(true),
                     None,
@@ -2826,8 +2827,8 @@ pub(crate) async fn run_tool_call_loop(
             Err(e) => {
                 let safe_error = crate::providers::sanitize_api_error(&e.to_string());
                 observer.record_event(&ObserverEvent::LlmResponse {
-                    provider: provider_name.to_string(),
-                    model: model.to_string(),
+                    provider: active_provider_name.to_string(),
+                    model: active_model.to_string(),
                     duration: llm_started_at.elapsed(),
                     success: false,
                     error_message: Some(safe_error.clone()),
@@ -2838,8 +2839,8 @@ pub(crate) async fn run_tool_call_loop(
                 runtime_trace::record_event(
                     "llm_response",
                     Some(channel_name),
-                    Some(provider_name),
-                    Some(model),
+                    Some(active_provider_name),
+                    Some(active_model),
                     Some(&turn_id),
                     Some(false),
                     Some(&safe_error),
@@ -2926,12 +2927,40 @@ pub(crate) async fn run_tool_call_loop(
             }
         }
 
+        // If the LLM returned completely empty (no text, no tool calls),
+        // retry once rather than sending a blank message to the user.
+        if tool_calls.is_empty() && display_text.trim().is_empty() && !empty_response_retried {
+            empty_response_retried = true;
+            tracing::warn!(
+                iteration = iteration + 1,
+                "LLM returned empty response with no tool calls; retrying"
+            );
+            runtime_trace::record_event(
+                "empty_response_retry",
+                Some(channel_name),
+                Some(active_provider_name),
+                Some(active_model),
+                Some(&turn_id),
+                None,
+                Some("LLM returned empty response; retrying"),
+                serde_json::json!({
+                    "iteration": iteration + 1,
+                }),
+            );
+            // Push a system nudge so the model has a signal to generate output.
+            history.push(ChatMessage::assistant(String::new()));
+            history.push(ChatMessage::system(
+                "Your previous response was empty. Please provide a response to the user's request.".to_string(),
+            ));
+            continue;
+        }
+
         if tool_calls.is_empty() {
             runtime_trace::record_event(
                 "turn_final_response",
                 Some(channel_name),
-                Some(provider_name),
-                Some(model),
+                Some(active_provider_name),
+                Some(active_model),
                 Some(&turn_id),
                 Some(true),
                 None,
@@ -3026,8 +3055,8 @@ pub(crate) async fn run_tool_call_loop(
                         runtime_trace::record_event(
                             "tool_call_result",
                             Some(channel_name),
-                            Some(provider_name),
-                            Some(model),
+                            Some(active_provider_name),
+                            Some(active_model),
                             Some(&turn_id),
                             Some(false),
                             Some(&cancelled),
@@ -3096,8 +3125,8 @@ pub(crate) async fn run_tool_call_loop(
                         runtime_trace::record_event(
                             "tool_call_result",
                             Some(channel_name),
-                            Some(provider_name),
-                            Some(model),
+                            Some(active_provider_name),
+                            Some(active_model),
                             Some(&turn_id),
                             Some(false),
                             Some(&denied),
@@ -3144,8 +3173,8 @@ pub(crate) async fn run_tool_call_loop(
                 runtime_trace::record_event(
                     "tool_call_result",
                     Some(channel_name),
-                    Some(provider_name),
-                    Some(model),
+                    Some(active_provider_name),
+                    Some(active_model),
                     Some(&turn_id),
                     Some(false),
                     Some(&duplicate),
@@ -3180,8 +3209,8 @@ pub(crate) async fn run_tool_call_loop(
             runtime_trace::record_event(
                 "tool_call_start",
                 Some(channel_name),
-                Some(provider_name),
-                Some(model),
+                Some(active_provider_name),
+                Some(active_model),
                 Some(&turn_id),
                 None,
                 None,
@@ -3255,8 +3284,8 @@ pub(crate) async fn run_tool_call_loop(
             runtime_trace::record_event(
                 "tool_call_result",
                 Some(channel_name),
-                Some(provider_name),
-                Some(model),
+                Some(active_provider_name),
+                Some(active_model),
                 Some(&turn_id),
                 Some(outcome.success),
                 outcome.error_reason.as_deref(),
@@ -3339,8 +3368,8 @@ pub(crate) async fn run_tool_call_loop(
                         runtime_trace::record_event(
                             "loop_detector_circuit_breaker",
                             Some(channel_name),
-                            Some(provider_name),
-                            Some(model),
+                            Some(active_provider_name),
+                            Some(active_model),
                             Some(&turn_id),
                             Some(false),
                             Some(&msg),
@@ -3392,8 +3421,8 @@ pub(crate) async fn run_tool_call_loop(
                 runtime_trace::record_event(
                     "tool_loop_identical_output_abort",
                     Some(channel_name),
-                    Some(provider_name),
-                    Some(model),
+                    Some(active_provider_name),
+                    Some(active_model),
                     Some(&turn_id),
                     Some(false),
                     Some("identical tool output detected 3 consecutive times"),
@@ -4545,7 +4574,8 @@ pub async fn process_message(
 mod tests {
     use super::{
         emergency_history_trim, estimate_history_tokens, fast_trim_tool_results,
-        load_interactive_session_history, save_interactive_session_history, truncate_tool_result,
+        load_interactive_session_history, save_interactive_session_history,
+        truncate_tool_message_content, truncate_tool_result,
     };
     use crate::agent::history::{DEFAULT_MAX_HISTORY_MESSAGES, InteractiveSessionState};
     use crate::agent::tool_execution::execute_one_tool;
@@ -4631,6 +4661,83 @@ mod tests {
         // Head (3 chars) + tail (2 chars) from original should be preserved
         assert!(result.starts_with("abc"));
         assert!(result.ends_with("yz"));
+    }
+
+    // ── truncate_tool_message_content tests ─────────────────────
+
+    #[test]
+    fn truncate_tool_message_content_preserves_json_wrapper() {
+        let inner = "x".repeat(5000);
+        let content = serde_json::json!({
+            "tool_call_id": "call_abc123",
+            "content": inner,
+        })
+        .to_string();
+
+        let result = truncate_tool_message_content(&content, 2000);
+
+        // Result must be valid JSON
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("truncated tool message must remain valid JSON");
+        // tool_call_id must be preserved
+        assert_eq!(
+            parsed.get("tool_call_id").and_then(|v| v.as_str()),
+            Some("call_abc123")
+        );
+        // Inner content should be truncated with marker
+        let inner_content = parsed.get("content").and_then(|v| v.as_str()).unwrap();
+        assert!(inner_content.contains("[... "));
+        assert!(inner_content.contains("characters truncated"));
+    }
+
+    #[test]
+    fn truncate_tool_message_content_plain_text_fallback() {
+        let content = "x".repeat(5000);
+        let result = truncate_tool_message_content(&content, 2000);
+        // Should truncate as plain text
+        assert!(result.contains("[... "));
+        assert!(result.len() < content.len());
+    }
+
+    #[test]
+    fn truncate_tool_message_content_short_passthrough() {
+        let content = serde_json::json!({
+            "tool_call_id": "call_abc",
+            "content": "short",
+        })
+        .to_string();
+        assert_eq!(truncate_tool_message_content(&content, 5000), content);
+    }
+
+    #[test]
+    fn fast_trim_preserves_json_tool_messages() {
+        let inner = "x".repeat(5000);
+        let json_content = serde_json::json!({
+            "tool_call_id": "call_test",
+            "content": inner,
+        })
+        .to_string();
+
+        let mut history = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("tool call"),
+            ChatMessage::tool(&json_content),
+            ChatMessage::user("follow up"),
+            ChatMessage::assistant("done"),
+        ];
+
+        let saved = fast_trim_tool_results(&mut history, 2);
+        assert!(saved > 0);
+
+        // The truncated tool message must remain valid JSON with tool_call_id
+        let tool_msg = &history[3];
+        let parsed: serde_json::Value = serde_json::from_str(&tool_msg.content)
+            .expect("tool message must remain valid JSON after trim");
+        assert_eq!(
+            parsed.get("tool_call_id").and_then(|v| v.as_str()),
+            Some("call_test")
+        );
     }
 
     // ── fast_trim_tool_results tests ────────────────────────────

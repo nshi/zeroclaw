@@ -483,6 +483,10 @@ pub struct ModelProviderConfig {
     /// may exceed a model's actual limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Context window size in tokens.
+    /// When set, overrides the model's default context window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 // ── Delegate Tool Configuration ─────────────────────────────────
@@ -11128,6 +11132,7 @@ requires_openai_auth = true
                     azure_openai_api_version: None,
                     api_path: None,
                     max_tokens: None,
+                    context_window: None,
                 },
             )]),
             ..Config::default()
@@ -11161,6 +11166,7 @@ requires_openai_auth = true
                     azure_openai_api_version: None,
                     api_path: None,
                     max_tokens: None,
+                    context_window: None,
                 },
             )]),
             api_key: None,
@@ -11271,6 +11277,7 @@ requires_openai_auth = true
                     azure_openai_api_version: None,
                     api_path: None,
                     max_tokens: None,
+                    context_window: None,
                 },
             )]),
             ..Config::default()

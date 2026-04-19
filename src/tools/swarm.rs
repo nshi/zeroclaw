@@ -553,7 +553,7 @@ mod tests {
         agents.insert(
             "researcher".to_string(),
             DelegateAgentConfig {
-                provider: "ollama".to_string(),
+                provider: "nonexistent-test-provider".to_string(),
                 model: "llama3".to_string(),
                 system_prompt: Some("You are a research assistant.".to_string()),
                 api_key: None,
@@ -888,7 +888,7 @@ mod tests {
                 timeout_secs: 60,
             },
         );
-        // researcher uses "ollama" which won't be running in CI
+        // researcher uses "nonexistent-test-provider" which is an unknown provider
         let tool = SwarmTool::new(
             swarms,
             sample_agents(),
@@ -957,7 +957,7 @@ mod tests {
             .await;
         assert!(
             result.is_err(),
-            "Expected error for unknown provider 'ollama'"
+            "Expected error for unknown provider 'nonexistent-test-provider'"
         );
     }
 }

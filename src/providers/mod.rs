@@ -18,6 +18,7 @@
 
 pub mod anthropic;
 pub mod gemini;
+pub mod ollama;
 pub mod openai;
 pub mod openrouter;
 pub mod reliable;
@@ -62,6 +63,9 @@ pub struct ProviderRuntimeOptions {
     /// non-primary provider at a custom URL without threading extra arguments
     /// through every factory call site.
     pub model_provider_base_urls: std::collections::HashMap<String, String>,
+    /// Context window size override.
+    /// Sourced from `[model_providers.<name>].context_window`.
+    pub provider_context_window: Option<u32>,
 }
 
 impl Default for ProviderRuntimeOptions {
@@ -78,6 +82,7 @@ impl Default for ProviderRuntimeOptions {
             api_path: None,
             provider_max_tokens: None,
             model_provider_base_urls: std::collections::HashMap::new(),
+            provider_context_window: None,
         }
     }
 }
@@ -106,6 +111,10 @@ pub fn provider_runtime_options_from_config(
                     .map(|url| (name.clone(), url.clone()))
             })
             .collect(),
+        provider_context_window: config
+            .model_providers
+            .get("ollama")
+            .and_then(|p| p.context_window),
     }
 }
 
@@ -229,6 +238,7 @@ fn resolve_provider_credential(name: &str, credential_override: Option<&str>) ->
         "openai" => vec!["OPENAI_API_KEY"],
         "gemini" | "google" | "google-gemini" => vec!["GOOGLE_API_KEY", "GEMINI_API_KEY"],
         "llamacpp" => vec!["LLAMACPP_API_KEY"],
+        "ollama" => vec!["OLLAMA_API_KEY"],
         _ => vec![],
     };
 
@@ -393,6 +403,28 @@ fn create_provider_with_url_and_options(
             )))
         }
 
+        // ── Ollama (native /api/chat endpoint) ──────────────
+        //
+        // Resolution order for the base URL:
+        //   1. Explicit `api_url` argument.
+        //   2. `[model_providers.ollama].base_url` from config.
+        //   3. Built-in default `http://localhost:11434`.
+        "ollama" => {
+            let resolved_url = api_url
+                .map(str::to_owned)
+                .or_else(|| options.model_provider_base_urls.get("ollama").cloned())
+                .unwrap_or_else(|| "http://localhost:11434".to_string());
+            let mut p = ollama::OllamaProvider::new()
+                .with_base_url(&resolved_url)
+                .with_timeout_secs(options.provider_timeout_secs)
+                .with_reasoning(options.reasoning_enabled)
+                .with_context_window(options.provider_context_window);
+            if let Some(mt) = options.provider_max_tokens {
+                p = p.with_max_tokens(Some(mt));
+            }
+            Ok(Box::new(p))
+        }
+
         // ── llama.cpp server (OpenAI-compatible) ─────────────
         //
         // Resolution order for the base URL:
@@ -437,7 +469,7 @@ fn create_provider_with_url_and_options(
         }
 
         _ => anyhow::bail!(
-            "Unknown provider: {name}. Supported providers: anthropic, openai, gemini, openrouter, llamacpp.\n\
+            "Unknown provider: {name}. Supported providers: anthropic, openai, gemini, openrouter, ollama, llamacpp.\n\
              Tip: Use \"anthropic-custom:https://your-api.com\" for Anthropic-compatible endpoints."
         ),
     }
@@ -661,6 +693,12 @@ pub fn list_providers() -> Vec<ProviderInfo> {
             display_name: "Google Gemini",
             aliases: &["google", "google-gemini"],
             local: false,
+        },
+        ProviderInfo {
+            name: "ollama",
+            display_name: "Ollama",
+            aliases: &[],
+            local: true,
         },
     ]
 }

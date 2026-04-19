@@ -545,6 +545,7 @@ def stepper(session: Session, dump: bool = False) -> None:
         parts.append("p=prev")
         parts.append("q=quit")
         parts.append("#=jump")
+        parts.append("r=raw")
         if has_system_prompt:
             parts.append("s=system prompt")
         prompt_text = c(f"[{', '.join(parts)}] ", "dim")
@@ -562,6 +563,11 @@ def stepper(session: Session, dump: bool = False) -> None:
         elif raw == "p":
             if idx > 0:
                 idx -= 1
+        elif raw == "r":
+            print()
+            print(c("── Raw JSON ──", "cyan", "bold"))
+            print(json.dumps(events[idx], indent=2, default=str))
+            print(c("── End Raw JSON ──", "cyan", "bold"))
         elif raw == "s" and has_system_prompt:
             _display_system_prompt(session)
         else:

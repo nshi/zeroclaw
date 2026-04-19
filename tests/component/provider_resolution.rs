@@ -113,19 +113,23 @@ fn factory_anthropic_custom_endpoint_resolves() {
 // FR-014: Removed provider aliases return clear errors
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Ollama provider resolution
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[test]
-fn removed_provider_ollama_returns_clear_error() {
-    let result = create_provider("ollama", None);
-    match result {
-        Ok(_) => panic!("removed provider 'ollama' should return an error"),
-        Err(e) => {
-            let err = e.to_string().to_lowercase();
-            assert!(
-                err.contains("unknown provider") || err.contains("supported"),
-                "error for removed provider should be descriptive, got: {e}"
-            );
-        }
-    }
+fn factory_resolves_ollama_provider() {
+    assert_provider_ok("ollama", None, None);
+}
+
+#[test]
+fn factory_resolves_ollama_with_custom_url() {
+    assert_provider_ok("ollama", None, Some("http://192.168.1.50:11434"));
+}
+
+#[test]
+fn factory_resolves_ollama_with_key() {
+    assert_provider_ok("ollama", Some("test-key"), None);
 }
 
 #[test]

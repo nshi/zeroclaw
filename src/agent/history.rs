@@ -28,6 +28,49 @@ pub(crate) fn truncate_tool_result(output: &str, max_chars: usize) -> String {
     if max_chars == 0 || output.len() <= max_chars {
         return output.to_string();
     }
+    truncate_plain_text(output, max_chars)
+}
+
+/// Truncate a tool message's content, preserving JSON wrapper structure if
+/// present. Tool messages in native tool mode store content as
+/// `{"tool_call_id": "...", "content": "..."}`. Naively truncating the outer
+/// string breaks the JSON, causing providers (especially Gemini) to reject the
+/// message. This function detects the JSON wrapper and truncates only the inner
+/// `"content"` value.
+pub(crate) fn truncate_tool_message_content(content: &str, max_chars: usize) -> String {
+    if max_chars == 0 || content.len() <= max_chars {
+        return content.to_string();
+    }
+
+    // Cheap guard: skip JSON parse for content that can't be a tool wrapper
+    if !(content.starts_with('{') && content.contains("tool_call_id")) {
+        return truncate_plain_text(content, max_chars);
+    }
+
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return truncate_plain_text(content, max_chars);
+    };
+    if value.get("tool_call_id").is_none() {
+        return truncate_plain_text(content, max_chars);
+    }
+    let Some(inner) = value.get("content").and_then(|v| v.as_str()) else {
+        return truncate_plain_text(content, max_chars);
+    };
+
+    // inner.len() is raw bytes; content.len() is JSON-serialized (escaping may
+    // make the serialized form shorter than the raw value), so use saturating_sub.
+    let envelope_overhead = content.len().saturating_sub(inner.len());
+    let inner_max = max_chars.saturating_sub(envelope_overhead);
+    if inner_max == 0 || inner.len() <= inner_max {
+        return truncate_plain_text(content, max_chars);
+    }
+
+    let truncated = truncate_plain_text(inner, inner_max);
+    value["content"] = serde_json::Value::String(truncated);
+    serde_json::to_string(&value).unwrap_or_else(|_| truncate_plain_text(content, max_chars))
+}
+
+fn truncate_plain_text(output: &str, max_chars: usize) -> String {
     let head_len = max_chars * 2 / 3;
     let tail_len = max_chars.saturating_sub(head_len);
     let head_end = floor_char_boundary(output, head_len);
@@ -68,7 +111,7 @@ pub(crate) fn fast_trim_tool_results(
     for msg in &mut history[..cutoff] {
         if msg.role == "tool" && msg.content.len() > trim_to {
             let original_len = msg.content.len();
-            msg.content = truncate_tool_result(&msg.content, trim_to);
+            msg.content = truncate_tool_message_content(&msg.content, trim_to);
             saved += original_len - msg.content.len();
         }
     }
