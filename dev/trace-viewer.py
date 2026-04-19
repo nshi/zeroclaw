@@ -428,6 +428,59 @@ def _render_turn_final(payload: dict) -> list[str]:
     return lines
 
 
+def _render_provider_api_request(payload: dict, event: dict | None = None) -> list[str]:
+    """Render the actual API request payload sent to a provider."""
+    lines = []
+    model = payload.get("model", "?")
+    provider = (event or {}).get("provider", "?")
+    lines.append(f"  {c('Provider:', 'bold')} {c(provider, 'dim')}")
+    lines.append(f"  {c('Model:', 'bold')} {c(model, 'dim')}")
+    stream = payload.get("stream", False)
+    lines.append(f"  {c('Stream:', 'bold')} {c(str(stream), 'dim')}")
+
+    # Options (temperature, num_ctx, etc.)
+    options = payload.get("options") or {}
+    if options:
+        parts = []
+        for k, v in options.items():
+            if v is not None:
+                parts.append(f"{k}={v}")
+        lines.append(f"  {c('Options:', 'bold')} {c(', '.join(parts), 'dim')}")
+
+    # Tools summary
+    tools = payload.get("tools") or []
+    if tools:
+        names = [t.get("function", {}).get("name", "?") for t in tools]
+        lines.append(f"  {c(f'Tools ({len(names)}):', 'bold')} {c(', '.join(names), 'dim')}")
+    else:
+        lines.append(f"  {c('Tools:', 'bold')} {c('none (prompt-guided)', 'dim')}")
+
+    # Think mode
+    think = payload.get("think")
+    if think is not None:
+        lines.append(f"  {c('Think:', 'bold')} {c(str(think), 'dim')}")
+
+    # Messages summary
+    messages = payload.get("messages") or []
+    lines.append(f"  {c('Messages:', 'bold')} {len(messages)}")
+    for msg in messages:
+        role = msg.get("role", "?")
+        content = msg.get("content", "")
+        has_images = bool(msg.get("images"))
+        has_tool_calls = bool(msg.get("tool_calls"))
+        suffix = ""
+        if has_images:
+            suffix += " [+images]"
+        if has_tool_calls:
+            suffix += " [+tool_calls]"
+        preview = content[:120].replace("\n", "\\n")
+        if len(content) > 120:
+            preview += "..."
+        lines.append(f"    {c(role, 'bold')}: {c(preview, 'dim')}{c(suffix, 'yellow')}")
+
+    return lines
+
+
 def _render_generic(payload: dict) -> list[str]:
     if not payload:
         return ["  (empty payload)"]
@@ -451,6 +504,7 @@ _RENDERERS = {
     "tool_call_start": _render_tool_call_start,
     "tool_call_result": _render_tool_call_result,
     "turn_final_response": _render_turn_final,
+    "provider_api_request": _render_provider_api_request,
 }
 
 
@@ -481,7 +535,7 @@ def format_turn(index: int, total: int, event: dict) -> str:
     header = c(f"── Turn {index}/{total} ── ", "cyan") + etype_colored + c(f" ── {ts} ──", "cyan") + tid_suffix + id_suffix
     payload = event.get("payload") or {}
     renderer = _RENDERERS.get(etype, _render_generic)
-    if etype in ("tool_call_result", "llm_request", "llm_response"):
+    if etype in ("tool_call_result", "llm_request", "llm_response", "provider_api_request"):
         body_lines = renderer(payload, event=event)
     else:
         body_lines = renderer(payload)
@@ -518,6 +572,36 @@ def _display_system_prompt(session: Session) -> None:
     print(c("── End System Prompt ──", "cyan", "bold"))
 
 
+def _find_provider_api_request(session: Session) -> dict | None:
+    """Return the first provider_api_request event payload in the session."""
+    for ev in session.events:
+        if ev.get("event_type") == "provider_api_request":
+            return ev.get("payload")
+    return None
+
+
+def _display_provider_api_request(session: Session) -> None:
+    payload = _find_provider_api_request(session)
+    if payload is None:
+        print(c("  (no provider API request in this session)", "dim"))
+        return
+    print()
+    print(c("── Provider API Request (full payload) ──", "cyan", "bold"))
+    # Show the full JSON, but truncate message content for readability
+    display = dict(payload)
+    messages = display.get("messages") or []
+    summarized = []
+    for msg in messages:
+        m = dict(msg)
+        content = m.get("content", "")
+        if len(content) > 500:
+            m["content"] = content[:500] + f"... ({len(content)} chars total)"
+        summarized.append(m)
+    display["messages"] = summarized
+    print(json.dumps(display, indent=2, default=str))
+    print(c("── End Provider API Request ──", "cyan", "bold"))
+
+
 def stepper(session: Session, dump: bool = False) -> None:
     events = session.events
     total = len(events)
@@ -526,6 +610,7 @@ def stepper(session: Session, dump: bool = False) -> None:
         return
 
     has_system_prompt = _find_system_prompt(session) is not None
+    has_provider_request = _find_provider_api_request(session) is not None
 
     if dump:
         for i, ev in enumerate(events, 1):
@@ -548,6 +633,8 @@ def stepper(session: Session, dump: bool = False) -> None:
         parts.append("r=raw")
         if has_system_prompt:
             parts.append("s=system prompt")
+        if has_provider_request:
+            parts.append("t=tools/provider")
         prompt_text = c(f"[{', '.join(parts)}] ", "dim")
 
         try:
@@ -570,6 +657,8 @@ def stepper(session: Session, dump: bool = False) -> None:
             print(c("── End Raw JSON ──", "cyan", "bold"))
         elif raw == "s" and has_system_prompt:
             _display_system_prompt(session)
+        elif raw == "t" and has_provider_request:
+            _display_provider_api_request(session)
         else:
             try:
                 jump = int(raw)

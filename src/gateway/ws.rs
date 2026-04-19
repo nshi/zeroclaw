@@ -384,12 +384,7 @@ async fn process_chat_message(
 ) {
     use crate::agent::TurnEvent;
 
-    let provider_label = state
-        .config
-        .lock()
-        .default_provider
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
+    let provider_label = state.provider_label();
 
     // Broadcast agent_start event
     let _ = state.event_tx.send(serde_json::json!({

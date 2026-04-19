@@ -5471,6 +5471,9 @@ pub struct ModelRouteConfig {
     /// Optional API key override for this route's provider
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Optional temperature override for this route (0.0–2.0)
+    #[serde(default)]
+    pub temperature: Option<f64>,
 }
 
 // ── Embedding routing ───────────────────────────────────────────

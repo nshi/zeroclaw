@@ -185,7 +185,7 @@ fn channel_message_timeout_budget_secs_with_cap(
     message_timeout_secs.saturating_mul(scale)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct ChannelRouteSelection {
     provider: String,
     model: String,
@@ -193,6 +193,8 @@ struct ChannelRouteSelection {
     /// the global `api_key` in [`ChannelRuntimeContext`] when creating the
     /// provider for this route.
     api_key: Option<String>,
+    /// Route-specific temperature override.
+    temperature: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -904,6 +906,7 @@ fn default_route_selection(ctx: &ChannelRuntimeContext) -> ChannelRouteSelection
         provider: defaults.default_provider,
         model: defaults.model,
         api_key: None,
+        temperature: None,
     }
 }
 
@@ -2369,7 +2372,22 @@ async fn process_channel_message(
                 provider: matched_route.provider.clone(),
                 model: matched_route.model.clone(),
                 api_key: matched_route.api_key.clone(),
+                temperature: matched_route.temperature,
             };
+        }
+    }
+
+    // When the model is a hint (e.g. "hint:gemma"), inherit per-route
+    // settings (temperature) from the matching ModelRouteConfig.
+    if route.temperature.is_none() {
+        if let Some(hint) = route.model.strip_prefix("hint:") {
+            if let Some(matched) = ctx
+                .model_routes
+                .iter()
+                .find(|r| r.hint.eq_ignore_ascii_case(hint))
+            {
+                route.temperature = matched.temperature;
+            }
         }
     }
 
@@ -2806,7 +2824,7 @@ async fn process_channel_message(
                         notify_observer.as_ref() as &dyn Observer,
                         route.provider.as_str(),
                         route.model.as_str(),
-                        runtime_defaults.temperature,
+                        route.temperature.unwrap_or(runtime_defaults.temperature),
                         true,
                         Some(&*ctx.approval_manager),
                         msg.channel.as_str(),
@@ -6009,6 +6027,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 provider: "openrouter".to_string(),
                 model: "route-model".to_string(),
                 api_key: None,
+                temperature: None,
             },
         );
 
@@ -9040,6 +9059,7 @@ This is an example JSON object for profile settings."#;
             provider: "vision-provider".into(),
             model: "gpt-4-vision".into(),
             api_key: None,
+            temperature: None,
         }];
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
@@ -9159,6 +9179,7 @@ This is an example JSON object for profile settings."#;
             provider: "vision-provider".into(),
             model: "gpt-4-vision".into(),
             api_key: None,
+            temperature: None,
         }];
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
@@ -9270,6 +9291,7 @@ This is an example JSON object for profile settings."#;
             provider: "vision-provider".into(),
             model: "gpt-4-vision".into(),
             api_key: None,
+            temperature: None,
         }];
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
@@ -9394,12 +9416,14 @@ This is an example JSON object for profile settings."#;
                 provider: "fast-provider".into(),
                 model: "fast-model".into(),
                 api_key: None,
+                temperature: None,
             },
             crate::config::ModelRouteConfig {
                 hint: "code".into(),
                 provider: "code-provider".into(),
                 model: "code-model".into(),
                 api_key: None,
+                temperature: None,
             },
         ];
 

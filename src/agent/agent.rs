@@ -349,6 +349,11 @@ impl Agent {
         self.history.clear();
     }
 
+    /// Resolve the actual provider name for a given model, honoring routing hints.
+    pub fn resolved_provider_name(&self, model: &str) -> Option<&str> {
+        self.provider.resolved_provider_name(model)
+    }
+
     pub fn set_memory_session_id(&mut self, session_id: Option<String>) {
         self.provider.set_session_id(session_id.as_deref());
         self.memory_session_id = session_id;
@@ -1239,15 +1244,18 @@ pub async fn run(
 
     let mut agent = Agent::from_config(&effective_config).await?;
 
-    let provider_name = effective_config
+    let config_provider = effective_config
         .default_provider
         .as_deref()
-        .unwrap_or("openrouter")
-        .to_string();
+        .unwrap_or("openrouter");
     let model_name = effective_config
         .default_model
         .as_deref()
         .unwrap_or("anthropic/claude-sonnet-4-20250514")
+        .to_string();
+    let provider_name = agent
+        .resolved_provider_name(&model_name)
+        .unwrap_or(config_provider)
         .to_string();
 
     agent.observer.record_event(&ObserverEvent::AgentStart {

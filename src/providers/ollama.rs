@@ -1,7 +1,7 @@
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
     ConversationMessage, Provider, ProviderCapabilities, StreamChunk, StreamError, StreamEvent,
-    StreamOptions, StreamResult, TokenUsage, ToolCall as ProviderToolCall, ToolsPayload,
+    StreamOptions, StreamResult, TokenUsage, ToolCall as ProviderToolCall,
 };
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
@@ -533,21 +533,37 @@ async fn handle_ollama_error(response: reqwest::Response) -> anyhow::Error {
     anyhow::anyhow!("Ollama API error ({status}): {sanitized}")
 }
 
+// ── Trace logging ──────────────────────────────────────────────────────────
+
+/// Log the actual API request payload to the runtime trace for debugging.
+fn trace_api_request(request: &OllamaChatRequest) {
+    if let Ok(payload) = serde_json::to_value(request) {
+        crate::observability::runtime_trace::record_event(
+            "provider_api_request",
+            None,
+            Some("ollama"),
+            Some(&request.model),
+            None,
+            None,
+            None,
+            payload,
+        );
+    }
+}
+
 // ── Provider trait implementation ───────────────────────────────────────────
 
 #[async_trait]
 impl Provider for OllamaProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            native_tool_calling: true,
+            // Default to prompt-guided tool calling (XML instructions in system
+            // prompt) because many Ollama-served models silently ignore the
+            // native /api/chat tools array and need explicit text instructions.
+            // See: https://github.com/zeroclaw-labs/zeroclaw/issues/3999
+            native_tool_calling: false,
             vision: true,
             prompt_caching: false,
-        }
-    }
-
-    fn convert_tools(&self, tools: &[ToolSpec]) -> ToolsPayload {
-        ToolsPayload::OpenAI {
-            tools: convert_tool_specs(tools),
         }
     }
 
@@ -627,6 +643,7 @@ impl Provider for OllamaProvider {
             think: None,
             options: self.build_options(temperature),
         };
+        trace_api_request(&request);
 
         let response = self
             .http_client()
@@ -643,40 +660,8 @@ impl Provider for OllamaProvider {
         Ok(api_resp.message.map(|m| m.content).unwrap_or_default())
     }
 
-    async fn chat(
-        &self,
-        request: ProviderChatRequest<'_>,
-        model: &str,
-        temperature: f64,
-    ) -> anyhow::Result<ProviderChatResponse> {
-        let reasoning_enabled = self.reasoning_enabled.unwrap_or(false);
-        let ollama_messages = convert_chat_messages(request.messages);
-        let tools = request.tools.map(convert_tool_specs);
-        let think = if reasoning_enabled { Some(true) } else { None };
-
-        let api_request = OllamaChatRequest {
-            model: model.to_string(),
-            messages: ollama_messages,
-            stream: false,
-            tools,
-            think,
-            options: self.build_options(temperature),
-        };
-
-        let response = self
-            .http_client()
-            .post(format!("{}/api/chat", self.base_url))
-            .json(&api_request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(handle_ollama_error(response).await);
-        }
-
-        let api_resp: ApiChatResponse = response.json().await?;
-        Ok(parse_chat_response(api_resp))
-    }
+    // chat() intentionally NOT overridden: the trait default handles
+    // prompt-guided tool injection when native_tool_calling is false.
 
     async fn chat_with_tools(
         &self,
@@ -701,6 +686,7 @@ impl Provider for OllamaProvider {
             think,
             options: self.build_options(temperature),
         };
+        trace_api_request(&api_request);
 
         let response = self
             .http_client()
@@ -724,7 +710,13 @@ impl Provider for OllamaProvider {
     }
 
     fn supports_streaming_tool_events(&self) -> bool {
-        true
+        // With native_tool_calling disabled, tools are injected into the
+        // system prompt as text. Streaming works fine for that path since
+        // tools aren't in the API request — but the agent loop uses this
+        // flag to decide whether to stream when tool specs are present.
+        // Return false so the non-streaming chat() path handles prompt-guided
+        // tool injection via the trait default.
+        false
     }
 
     fn stream_chat(
@@ -747,6 +739,7 @@ impl Provider for OllamaProvider {
             think,
             options: self.build_options(temperature),
         };
+        trace_api_request(&api_request);
 
         let client = self.http_client();
         let url = format!("{}/api/chat", self.base_url);
@@ -1431,10 +1424,13 @@ mod tests {
     // ── Provider capabilities ───────────────────────────────────────────────
 
     #[test]
-    fn provider_capabilities() {
+    fn provider_capabilities_disable_native_tools() {
         let provider = OllamaProvider::new();
         let caps = provider.capabilities();
-        assert!(caps.native_tool_calling);
+        assert!(
+            !caps.native_tool_calling,
+            "Ollama should default to prompt-guided tool calling"
+        );
         assert!(caps.vision);
         assert!(!caps.prompt_caching);
     }
@@ -1443,7 +1439,10 @@ mod tests {
     fn provider_supports_streaming() {
         let provider = OllamaProvider::new();
         assert!(provider.supports_streaming());
-        assert!(provider.supports_streaming_tool_events());
+        assert!(
+            !provider.supports_streaming_tool_events(),
+            "Ollama should not stream tool events (prompt-guided mode)"
+        );
     }
 
     // ── Builder methods ─────────────────────────────────────────────────────

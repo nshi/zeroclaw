@@ -443,6 +443,14 @@ pub trait Provider: Send + Sync {
         self.capabilities().native_tool_calling
     }
 
+    /// Resolve a model parameter to the actual provider name that will handle it.
+    ///
+    /// For routers this returns the resolved provider (e.g. "ollama" for "hint:gemma").
+    /// Non-router providers return `None` (caller should use the configured name).
+    fn resolved_provider_name(&self, _model: &str) -> Option<&str> {
+        None
+    }
+
     /// Whether provider supports multimodal vision input.
     fn supports_vision(&self) -> bool {
         self.capabilities().vision
@@ -560,6 +568,7 @@ pub fn build_tool_instructions_text(tools: &[ToolSpec]) -> String {
     instructions.push_str("\n</tool_call>\n\n");
     instructions.push_str(crate::agent::prompt::TOOL_CALL_INSTRUCTIONS);
     instructions.push_str("\n\nMultiple tool calls per response allowed. Results appear in <tool_result> tags. Continue reasoning until you can give a final answer.\n\n");
+    instructions.push_str("IMPORTANT: The \"name\" in a tool_call MUST be one of the tools listed below. Skills (from <available_skills>) are NOT tools — invoke them via the `use_skill` tool.\n\n");
     instructions.push_str("### Available Tools\n\n");
 
     for tool in tools {

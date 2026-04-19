@@ -2200,10 +2200,6 @@ fn maybe_inject_channel_delivery_defaults(
     channel_name: &str,
     channel_reply_target: Option<&str>,
 ) {
-    if tool_name != "cron_add" {
-        return;
-    }
-
     if !matches!(
         channel_name,
         "telegram" | "discord" | "slack" | "mattermost" | "matrix"
@@ -2221,6 +2217,24 @@ fn maybe_inject_channel_delivery_defaults(
     let Some(args) = tool_args.as_object_mut() else {
         return;
     };
+
+    if tool_name == "ask_user" {
+        if !args.contains_key("channel") {
+            args.insert(
+                "channel".to_string(),
+                serde_json::Value::String(channel_name.to_string()),
+            );
+        }
+        args.insert(
+            "reply_target".to_string(),
+            serde_json::Value::String(reply_target.to_string()),
+        );
+        return;
+    }
+
+    if tool_name != "cron_add" {
+        return;
+    }
 
     let is_agent_job = args
         .get("job_type")
@@ -2358,6 +2372,12 @@ pub(crate) async fn run_tool_call_loop(
     let mut pre_nudge_response_text: Option<String> = None;
     let mut empty_response_retried = false;
 
+    // Resolve the actual provider name for routed models (e.g. "hint:gemma" → "ollama").
+    // Loop-invariant: provider and model don't change (model switches exit with Err).
+    let resolved_name = provider
+        .resolved_provider_name(model)
+        .unwrap_or(provider_name);
+
     for iteration in 0..max_iterations {
         let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
 
@@ -2494,11 +2514,11 @@ pub(crate) async fn run_tool_call_loop(
                 let vp_name = multimodal_config
                     .vision_provider
                     .as_deref()
-                    .unwrap_or(provider_name);
+                    .unwrap_or(resolved_name);
                 let vm = multimodal_config.vision_model.as_deref().unwrap_or(model);
                 (vp_box.as_ref(), vp_name, vm)
             } else {
-                (provider, provider_name, model)
+                (provider, resolved_name, model)
             };
 
         let prepared_messages =

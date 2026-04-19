@@ -129,10 +129,16 @@ impl RouterProvider {
         (self.default_index, self.default_model.clone())
     }
 
-    /// Resolve a model parameter to a (provider, actual_model) pair.
-    ///
-    /// If the model starts with "hint:", look up the hint in the route table.
-    /// Otherwise, use the default provider with the given model name.
+    /// Resolve a model hint to a provider index only (no model string allocation).
+    fn resolve_index(&self, model: &str) -> usize {
+        if let Some(hint) = model.strip_prefix("hint:") {
+            if let Some((idx, _)) = self.routes.get(hint) {
+                return *idx;
+            }
+        }
+        self.default_index
+    }
+
     /// Resolve a model parameter to a (provider_index, actual_model) pair.
     fn resolve(&self, model: &str) -> (usize, String) {
         if let Some(hint) = model.strip_prefix("hint:") {
@@ -148,6 +154,7 @@ impl RouterProvider {
         // Not a hint or hint not found — use default provider with the model as-is
         (self.default_index, model.to_string())
     }
+
 }
 
 /// A cost-optimized routing strategy that selects the cheapest qualifying
@@ -262,10 +269,17 @@ impl Provider for RouterProvider {
     }
 
     fn supports_native_tools(&self) -> bool {
+        // Return true if any provider supports native tools, since the router
+        // resolves to the correct provider per-request. This prevents a
+        // non-native default from silently dropping tool specs for routes
+        // that do support them.
         self.providers
-            .get(self.default_index)
-            .map(|(_, p)| p.supports_native_tools())
-            .unwrap_or(false)
+            .iter()
+            .any(|(_, p)| p.supports_native_tools())
+    }
+
+    fn resolved_provider_name(&self, model: &str) -> Option<&str> {
+        Some(&self.providers[self.resolve_index(model)].0)
     }
 
     fn supports_streaming(&self) -> bool {

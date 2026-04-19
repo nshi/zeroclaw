@@ -338,6 +338,22 @@ pub struct AppState {
     pub webauthn: Option<Arc<api_webauthn::WebAuthnState>>,
 }
 
+impl AppState {
+    /// Resolve the effective provider label, honoring model-hint routing.
+    fn provider_label(&self) -> String {
+        let config_default = self
+            .config
+            .lock()
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        self.provider
+            .resolved_provider_name(&self.model)
+            .unwrap_or(&config_default)
+            .to_string()
+    }
+}
+
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
 #[allow(clippy::too_many_lines)]
 pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
@@ -1213,12 +1229,7 @@ async fn handle_webhook(
             .await;
     }
 
-    let provider_label = state
-        .config
-        .lock()
-        .default_provider
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
+    let provider_label = state.provider_label();
     let model_label = state.model.clone();
     let started_at = Instant::now();
 
