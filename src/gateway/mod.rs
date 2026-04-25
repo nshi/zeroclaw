@@ -1088,8 +1088,12 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
-        crate::agent::prompt::build_system_prompt(&ctx).unwrap_or_default()
+        crate::agent::prompt::SystemPromptBuilder::with_defaults()
+            .build(&ctx)
+            .unwrap_or_default()
     };
 
     let mut messages = Vec::with_capacity(1 + user_messages.len());

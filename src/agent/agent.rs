@@ -606,6 +606,8 @@ impl Agent {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
         self.prompt_builder.build(&ctx)
     }
@@ -831,6 +833,8 @@ impl Agent {
                         } else {
                             None
                         },
+                        prompt_builder: None,
+                        prompt_context: None,
                     },
                     &effective_model,
                     self.temperature,
@@ -1010,6 +1014,8 @@ impl Agent {
                     } else {
                         None
                     },
+                    prompt_builder: None,
+                    prompt_context: None,
                 },
                 &effective_model,
                 self.temperature,
@@ -1097,6 +1103,8 @@ impl Agent {
                             } else {
                                 None
                             },
+                            prompt_builder: None,
+                            prompt_context: None,
                         },
                         &effective_model,
                         self.temperature,

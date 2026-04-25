@@ -229,6 +229,11 @@ pub struct PromptContext<'a> {
     pub reply_target: Option<&'a str>,
     /// Pre-rendered deferred MCP tools section. Empty = skip.
     pub deferred_tools_text: &'a str,
+    /// Thinking level prefix text (e.g., "Thinking level: High").
+    /// Read by `ThinkingDirectiveSection`.
+    pub thinking_directive: Option<&'a str>,
+    /// Memory recall context string. Read by `MemoryContextSection`.
+    pub memory_context: Option<&'a str>,
 }
 
 pub trait PromptSection: Send + Sync {
@@ -264,8 +269,52 @@ impl SystemPromptBuilder {
         }
     }
 
-    pub fn add_section(mut self, section: Box<dyn PromptSection>) -> Self {
+    /// Creates an empty builder (for delegate/custom use cases).
+    pub fn new() -> Self {
+        Self {
+            sections: Vec::new(),
+        }
+    }
+
+    /// Insert section at the front of the section list.
+    pub fn push_front(&mut self, section: Box<dyn PromptSection>) -> &mut Self {
+        self.sections.insert(0, section);
+        self
+    }
+
+    /// Append section at the end of the section list.
+    pub fn push_back(&mut self, section: Box<dyn PromptSection>) -> &mut Self {
         self.sections.push(section);
+        self
+    }
+
+    /// Insert section before the section with the given name. No-op if not found.
+    pub fn insert_before(&mut self, name: &str, section: Box<dyn PromptSection>) -> &mut Self {
+        if let Some(pos) = self.sections.iter().position(|s| s.name() == name) {
+            self.sections.insert(pos, section);
+        }
+        self
+    }
+
+    /// Insert section after the section with the given name. No-op if not found.
+    pub fn insert_after(&mut self, name: &str, section: Box<dyn PromptSection>) -> &mut Self {
+        if let Some(pos) = self.sections.iter().position(|s| s.name() == name) {
+            self.sections.insert(pos + 1, section);
+        }
+        self
+    }
+
+    /// Replace the section with the given name. No-op if not found.
+    pub fn replace(&mut self, name: &str, section: Box<dyn PromptSection>) -> &mut Self {
+        if let Some(pos) = self.sections.iter().position(|s| s.name() == name) {
+            self.sections[pos] = section;
+        }
+        self
+    }
+
+    /// Remove the section with the given name. No-op if not found.
+    pub fn remove(&mut self, name: &str) -> &mut Self {
+        self.sections.retain(|s| s.name() != name);
         self
     }
 
@@ -308,6 +357,74 @@ pub struct ChannelCapabilitiesSection;
 pub struct ChannelDeliverySection;
 pub struct ToolUseProtocolSection;
 pub struct DeferredToolsSection;
+
+pub struct ThinkingDirectiveSection;
+
+/// A section holding static owned text. Does NOT read from `PromptContext`.
+/// Used for provider identity prefixes, control tokens, shell policies, etc.
+pub struct StaticTextSection {
+    pub section_name: &'static str,
+    pub text: String,
+}
+
+/// Convenience constructors for common static-text sections.
+impl StaticTextSection {
+    pub fn provider_identity(text: String) -> Self {
+        Self {
+            section_name: "provider_identity",
+            text,
+        }
+    }
+
+    pub fn thinking_token(token: String) -> Self {
+        Self {
+            section_name: "thinking_token",
+            text: token,
+        }
+    }
+}
+
+/// Backwards-compatible aliases.
+pub type ProviderIdentitySection = StaticTextSection;
+pub type ThinkingTokenSection = StaticTextSection;
+
+pub struct MemoryContextSection;
+
+impl PromptSection for ThinkingDirectiveSection {
+    fn name(&self) -> &str {
+        "thinking_directive"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        match ctx.thinking_directive {
+            Some(directive) if !directive.is_empty() => Ok(directive.to_string()),
+            _ => Ok(String::new()),
+        }
+    }
+}
+
+impl PromptSection for StaticTextSection {
+    fn name(&self) -> &str {
+        self.section_name
+    }
+
+    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
+        Ok(self.text.clone())
+    }
+}
+
+impl PromptSection for MemoryContextSection {
+    fn name(&self) -> &str {
+        "memory_context"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        match ctx.memory_context {
+            Some(memory) if !memory.is_empty() => Ok(memory.to_string()),
+            _ => Ok(String::new()),
+        }
+    }
+}
 
 impl PromptSection for IdentitySection {
     fn name(&self) -> &str {
@@ -719,11 +836,6 @@ impl PromptSection for DeferredToolsSection {
     }
 }
 
-/// Convenience function: build a system prompt with all default sections.
-pub fn build_system_prompt(ctx: &PromptContext) -> Result<String> {
-    SystemPromptBuilder::with_defaults().build(ctx)
-}
-
 /// Test helpers for constructing `PromptContext` and mock tools in other modules.
 #[cfg(test)]
 pub mod test_helpers {
@@ -777,6 +889,8 @@ pub mod test_helpers {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         }
     }
 }
@@ -850,6 +964,8 @@ mod tests {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
 
         let section = IdentitySection;
@@ -887,6 +1003,8 @@ mod tests {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
         let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
         assert!(prompt.contains("## Tools"));
@@ -931,6 +1049,8 @@ mod tests {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
 
         let output = SkillsSection.build(&ctx).unwrap();
@@ -979,6 +1099,8 @@ mod tests {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
 
         let output = SkillsSection.build(&ctx).unwrap();
@@ -1030,6 +1152,8 @@ mod tests {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
 
         let rendered = ModelGuidanceSection.build(&ctx).unwrap();
@@ -1057,6 +1181,8 @@ mod tests {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
 
         let rendered = ModelGuidanceSection.build(&ctx).unwrap();
@@ -1099,6 +1225,8 @@ mod tests {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
 
         let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
@@ -1139,6 +1267,8 @@ mod tests {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -1180,6 +1310,8 @@ mod tests {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -1213,6 +1345,8 @@ mod tests {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -1254,6 +1388,8 @@ mod tests {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -1626,5 +1762,234 @@ mod tests {
         );
         assert_eq!(super::first_sentence("Only sentence"), "Only sentence");
         assert_eq!(super::first_sentence("Has period."), "Has period.");
+    }
+
+    /// Generate system prompt snapshots for before/after regression testing.
+    /// Run with: cargo test snapshot_system_prompts -- --ignored
+    #[test]
+    #[ignore = "writes snapshot files to disk — run manually for regression testing"]
+    fn snapshot_system_prompts() {
+        let snapshot_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("specs/008-modular-system-prompt-builder/snapshots");
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+
+        let tools: Vec<Box<dyn Tool>> = vec![
+            make_named_tool("shell"),
+            make_named_tool("file_read"),
+            make_named_tool("tool_search"),
+        ];
+
+        // Config 1: CLI + Anthropic (native tools)
+        let mut ctx = make_ctx(&tools);
+        ctx.native_tools = true;
+        ctx.model_name = "claude-sonnet-4-20250514";
+        let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        std::fs::write(snapshot_dir.join("cli_anthropic.txt"), &prompt).unwrap();
+
+        // Config 2: Telegram + Ollama/Gemma (non-native tools, channel)
+        let mut ctx = make_ctx(&tools);
+        ctx.native_tools = false;
+        ctx.model_name = "gemma3:27b";
+        ctx.channel_name = Some("telegram");
+        ctx.reply_target = Some("user123");
+        let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        std::fs::write(snapshot_dir.join("telegram_ollama_gemma.txt"), &prompt).unwrap();
+
+        // Config 3: CLI + OpenAI (native tools)
+        let mut ctx = make_ctx(&tools);
+        ctx.native_tools = true;
+        ctx.model_name = "gpt-4o";
+        let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        std::fs::write(snapshot_dir.join("cli_openai.txt"), &prompt).unwrap();
+
+        eprintln!("Snapshots written to {}", snapshot_dir.display());
+    }
+
+    // ── T008: Builder mutation method tests ──────────────────────
+
+    /// Helper section for testing builder mutations.
+    struct StubSection(&'static str);
+    impl PromptSection for StubSection {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
+            Ok(format!("[{}]", self.0))
+        }
+    }
+
+    fn stub(name: &'static str) -> Box<dyn PromptSection> {
+        Box::new(StubSection(name))
+    }
+
+    fn section_names(builder: &SystemPromptBuilder) -> Vec<&str> {
+        builder.sections.iter().map(|s| s.name()).collect()
+    }
+
+    #[test]
+    fn push_front_inserts_at_beginning() {
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(stub("a"));
+        builder.push_front(stub("z"));
+        assert_eq!(section_names(&builder), vec!["z", "a"]);
+    }
+
+    #[test]
+    fn push_back_appends_at_end() {
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(stub("a"));
+        builder.push_back(stub("b"));
+        assert_eq!(section_names(&builder), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn insert_before_places_correctly() {
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(stub("a"));
+        builder.push_back(stub("c"));
+        builder.insert_before("c", stub("b"));
+        assert_eq!(section_names(&builder), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn insert_before_noop_when_not_found() {
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(stub("a"));
+        builder.insert_before("missing", stub("b"));
+        assert_eq!(section_names(&builder), vec!["a"]);
+    }
+
+    #[test]
+    fn insert_after_places_correctly() {
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(stub("a"));
+        builder.push_back(stub("c"));
+        builder.insert_after("a", stub("b"));
+        assert_eq!(section_names(&builder), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn insert_after_noop_when_not_found() {
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(stub("a"));
+        builder.insert_after("missing", stub("b"));
+        assert_eq!(section_names(&builder), vec!["a"]);
+    }
+
+    #[test]
+    fn replace_swaps_section() {
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(stub("a"));
+        builder.push_back(stub("b"));
+        builder.replace("a", stub("a_v2"));
+        assert_eq!(section_names(&builder), vec!["a_v2", "b"]);
+    }
+
+    #[test]
+    fn replace_noop_when_not_found() {
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(stub("a"));
+        builder.replace("missing", stub("x"));
+        assert_eq!(section_names(&builder), vec!["a"]);
+    }
+
+    #[test]
+    fn remove_deletes_section() {
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(stub("a"));
+        builder.push_back(stub("b"));
+        builder.push_back(stub("c"));
+        builder.remove("b");
+        assert_eq!(section_names(&builder), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn remove_noop_when_not_found() {
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(stub("a"));
+        builder.remove("missing");
+        assert_eq!(section_names(&builder), vec!["a"]);
+    }
+
+    // ── T009: New section tests ─────────────────────────────────
+
+    #[test]
+    fn thinking_directive_section_renders_when_present() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let mut ctx = make_ctx(&tools);
+        ctx.thinking_directive = Some("Thinking level: High — reason step by step");
+        let output = ThinkingDirectiveSection.build(&ctx).unwrap();
+        assert_eq!(output, "Thinking level: High — reason step by step");
+    }
+
+    #[test]
+    fn thinking_directive_section_empty_when_none() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = make_ctx(&tools);
+        let output = ThinkingDirectiveSection.build(&ctx).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn memory_context_section_renders_when_present() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let mut ctx = make_ctx(&tools);
+        ctx.memory_context = Some("Recalled: user prefers concise answers");
+        let output = MemoryContextSection.build(&ctx).unwrap();
+        assert_eq!(output, "Recalled: user prefers concise answers");
+    }
+
+    #[test]
+    fn memory_context_section_empty_when_none() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = make_ctx(&tools);
+        let output = MemoryContextSection.build(&ctx).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn static_text_section_renders_owned_text() {
+        let section = StaticTextSection::provider_identity(
+            "You are Claude Code, Anthropic's official CLI for Claude.".into(),
+        );
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = make_ctx(&tools);
+        let output = section.build(&ctx).unwrap();
+        assert!(output.contains("Claude Code"));
+        assert_eq!(section.name(), "provider_identity");
+    }
+
+    #[test]
+    fn static_text_section_thinking_token() {
+        let section = StaticTextSection::thinking_token("<|think|>".into());
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = make_ctx(&tools);
+        let output = section.build(&ctx).unwrap();
+        assert_eq!(output, "<|think|>");
+        assert_eq!(section.name(), "thinking_token");
+    }
+
+    #[test]
+    fn static_text_section_custom_name() {
+        let section = StaticTextSection {
+            section_name: "shell_policy",
+            text: "No destructive commands".into(),
+        };
+        assert_eq!(section.name(), "shell_policy");
+    }
+
+    #[test]
+    fn truncation_with_new_sections() {
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(Box::new(StaticTextSection::provider_identity(
+            "A".repeat(50),
+        )));
+        builder.push_back(Box::new(StaticTextSection::thinking_token("B".repeat(50))));
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let mut ctx = make_ctx(&tools);
+        ctx.max_system_prompt_chars = 60;
+        let output = builder.build(&ctx).unwrap();
+        assert!(output.contains("[System prompt truncated"));
+        assert!(output.len() < 150);
     }
 }

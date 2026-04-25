@@ -154,7 +154,6 @@ impl RouterProvider {
         // Not a hint or hint not found — use default provider with the model as-is
         (self.default_index, model.to_string())
     }
-
 }
 
 /// A cost-optimized routing strategy that selects the cheapest qualifying
@@ -1174,6 +1173,8 @@ mod tests {
             ChatRequest {
                 messages: &messages,
                 tools: Some(&tools),
+                prompt_builder: None,
+                prompt_context: None,
             },
             "hint:reasoning",
             0.0,

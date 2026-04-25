@@ -2048,6 +2048,8 @@ async fn consume_provider_streaming_response(
         ChatRequest {
             messages,
             tools: request_tools,
+            prompt_builder: None,
+            prompt_context: None,
         },
         model,
         temperature,
@@ -2645,6 +2647,8 @@ pub(crate) async fn run_tool_call_loop(
                             ChatRequest {
                                 messages: &prepared_messages.messages,
                                 tools: request_tools,
+                                prompt_builder: None,
+                                prompt_context: None,
                             },
                             active_model,
                             temperature,
@@ -2667,6 +2671,8 @@ pub(crate) async fn run_tool_call_loop(
                 ChatRequest {
                     messages: &prepared_messages.messages,
                     tools: request_tools,
+                    prompt_builder: None,
+                    prompt_context: None,
                 },
                 active_model,
                 temperature,
@@ -3521,6 +3527,8 @@ pub(crate) async fn run_tool_call_loop(
     let summary_request = crate::providers::ChatRequest {
         messages: history,
         tools: None, // No tools — force a text response
+        prompt_builder: None,
+        prompt_context: None,
     };
     match provider.chat(summary_request, model, temperature).await {
         Ok(resp) => {
@@ -3542,6 +3550,39 @@ pub(crate) async fn run_tool_call_loop(
 // provider) and enters either single-shot or
 // interactive REPL mode. The interactive loop manages history compaction
 // and hard trimming to keep the context window bounded.
+
+/// Build a `PromptContext` from the common parameters shared by both the
+/// interactive loop (`run`) and the one-shot `process_message` path.
+fn build_prompt_context<'a>(
+    config: &'a Config,
+    model_name: &'a str,
+    tools: &'a [Box<dyn Tool>],
+    skills: &'a [crate::skills::Skill],
+    i18n_descs: &'a crate::i18n::ToolDescriptions,
+    native_tools: bool,
+    deferred_section: &'a str,
+) -> crate::agent::prompt::PromptContext<'a> {
+    crate::agent::prompt::PromptContext {
+        workspace_dir: &config.workspace_dir,
+        model_name,
+        tools,
+        skills,
+        skills_prompt_mode: config.skills.prompt_injection_mode,
+        identity_config: Some(&config.identity),
+        dispatcher_instructions: "",
+        tool_descriptions: Some(i18n_descs),
+        security_summary: None,
+        autonomy_level: config.autonomy.level,
+        native_tools,
+        compact_context: config.agent.compact_context,
+        max_system_prompt_chars: config.agent.max_system_prompt_chars,
+        channel_name: None,
+        reply_target: None,
+        deferred_tools_text: deferred_section,
+        thinking_directive: None,
+        memory_context: None,
+    }
+}
 
 #[allow(clippy::too_many_lines)]
 pub async fn run(
@@ -3747,26 +3788,21 @@ pub async fn run(
     tools::register_skill_tools(&mut tools_registry, &skills, security.clone());
 
     let native_tools = provider.supports_native_tools();
-    let prompt_ctx = crate::agent::prompt::PromptContext {
-        workspace_dir: &config.workspace_dir,
-        model_name: &model_name,
-        tools: &tools_registry,
-        skills: &skills,
-        skills_prompt_mode: config.skills.prompt_injection_mode,
-        identity_config: Some(&config.identity),
-        dispatcher_instructions: "",
-        tool_descriptions: Some(&i18n_descs),
-        security_summary: None,
-        autonomy_level: config.autonomy.level,
-        native_tools,
-        compact_context: config.agent.compact_context,
-        max_system_prompt_chars: config.agent.max_system_prompt_chars,
-        channel_name: None,
-        reply_target: None,
-        deferred_tools_text: &deferred_section,
+    let mut builder = crate::agent::prompt::SystemPromptBuilder::with_defaults();
+    builder.push_front(Box::new(crate::agent::prompt::ThinkingDirectiveSection));
+    let system_prompt = {
+        let ctx = build_prompt_context(
+            &config,
+            &model_name,
+            &tools_registry,
+            &skills,
+            &i18n_descs,
+            native_tools,
+            &deferred_section,
+        );
+        provider.customize_prompt_builder(&mut builder, &ctx);
+        builder.build(&ctx).unwrap_or_default()
     };
-    let mut system_prompt =
-        crate::agent::prompt::build_system_prompt(&prompt_ctx).unwrap_or_default();
 
     // ── Approval manager (supervised mode) ───────────────────────
     let approval_manager = if interactive {
@@ -3789,10 +3825,6 @@ pub async fn run(
 
     let mut final_output = String::new();
 
-    // Save the base system prompt before any thinking modifications so
-    // the interactive loop can restore it between turns.
-    let base_system_prompt = system_prompt.clone();
-
     if let Some(msg) = message {
         // ── Parse thinking directive from user message ─────────
         let (thinking_directive, effective_msg) =
@@ -3813,10 +3845,20 @@ pub async fn run(
             temperature + thinking_params.temperature_adjustment,
         );
 
-        // Prepend thinking system prompt prefix when present.
-        if let Some(ref prefix) = thinking_params.system_prompt_prefix {
-            system_prompt = format!("{prefix}\n\n{system_prompt}");
-        }
+        // Rebuild system prompt with thinking directive baked in via builder section.
+        let system_prompt = {
+            let mut ctx = build_prompt_context(
+                &config,
+                &model_name,
+                &tools_registry,
+                &skills,
+                &i18n_descs,
+                native_tools,
+                &deferred_section,
+            );
+            ctx.thinking_directive = thinking_params.system_prompt_prefix.as_deref();
+            builder.build(&ctx).unwrap_or_default()
+        };
 
         // Auto-save user message to memory (skip short/trivial messages)
         if config.memory.auto_save
@@ -4074,14 +4116,22 @@ pub async fn run(
                 temperature + thinking_params.temperature_adjustment,
             );
 
-            // For non-Medium levels, temporarily patch the system prompt with prefix.
-            let turn_system_prompt;
-            if let Some(ref prefix) = thinking_params.system_prompt_prefix {
-                turn_system_prompt = format!("{prefix}\n\n{system_prompt}");
-                // Update the system message in history for this turn.
+            // Rebuild system prompt with thinking directive for this turn.
+            {
+                let mut ctx = build_prompt_context(
+                    &config,
+                    &model_name,
+                    &tools_registry,
+                    &skills,
+                    &i18n_descs,
+                    native_tools,
+                    &deferred_section,
+                );
+                ctx.thinking_directive = thinking_params.system_prompt_prefix.as_deref();
+                let turn_system_prompt = builder.build(&ctx).unwrap_or_default();
                 if let Some(sys_msg) = history.first_mut() {
                     if sys_msg.role == "system" {
-                        sys_msg.content = turn_system_prompt.clone();
+                        sys_msg.content = turn_system_prompt;
                     }
                 }
             }
@@ -4322,11 +4372,11 @@ pub async fn run(
             // Hard cap as a safety net.
             trim_history(&mut history, config.agent.max_history_messages);
 
-            // Restore base system prompt (remove per-turn thinking prefix).
+            // Restore system prompt without thinking prefix for history persistence.
             if thinking_params.system_prompt_prefix.is_some() {
                 if let Some(sys_msg) = history.first_mut() {
                     if sys_msg.role == "system" {
-                        sys_msg.content.clone_from(&base_system_prompt);
+                        sys_msg.content.clone_from(&system_prompt);
                     }
                 }
             }
@@ -4495,26 +4545,18 @@ pub async fn process_message(
     tools::register_skill_tools(&mut tools_registry, &skills, security.clone());
 
     let native_tools = provider.supports_native_tools();
-    let prompt_ctx = crate::agent::prompt::PromptContext {
-        workspace_dir: &config.workspace_dir,
-        model_name: &model_name,
-        tools: &tools_registry,
-        skills: &skills,
-        skills_prompt_mode: config.skills.prompt_injection_mode,
-        identity_config: Some(&config.identity),
-        dispatcher_instructions: "",
-        tool_descriptions: Some(&i18n_descs),
-        security_summary: None,
-        autonomy_level: config.autonomy.level,
+    let mut prompt_ctx = build_prompt_context(
+        &config,
+        &model_name,
+        &tools_registry,
+        &skills,
+        &i18n_descs,
         native_tools,
-        compact_context: config.agent.compact_context,
-        max_system_prompt_chars: config.agent.max_system_prompt_chars,
-        channel_name: None,
-        reply_target: None,
-        deferred_tools_text: &deferred_section,
-    };
-    let mut system_prompt =
-        crate::agent::prompt::build_system_prompt(&prompt_ctx).unwrap_or_default();
+        &deferred_section,
+    );
+    let mut builder = crate::agent::prompt::SystemPromptBuilder::with_defaults();
+    builder.push_front(Box::new(crate::agent::prompt::ThinkingDirectiveSection));
+    provider.customize_prompt_builder(&mut builder, &prompt_ctx);
 
     // ── Parse thinking directive from user message ─────────────
     let (thinking_directive, effective_message) =
@@ -4535,10 +4577,9 @@ pub async fn process_message(
         config.default_temperature + thinking_params.temperature_adjustment,
     );
 
-    // Prepend thinking system prompt prefix when present.
-    if let Some(ref prefix) = thinking_params.system_prompt_prefix {
-        system_prompt = format!("{prefix}\n\n{system_prompt}");
-    }
+    // Set thinking directive on context and rebuild system prompt.
+    prompt_ctx.thinking_directive = thinking_params.system_prompt_prefix.as_deref();
+    let system_prompt = builder.build(&prompt_ctx).unwrap_or_default();
 
     let effective_msg_ref = effective_message.as_str();
     let mem_context = build_context(
@@ -8683,13 +8724,13 @@ Let me check the result."#;
     /// the output must contain ZERO XML protocol artifacts.
     #[test]
     fn native_tools_system_prompt_contains_zero_xml() {
-        use crate::agent::prompt::{build_system_prompt, test_helpers::make_named_tool};
+        use crate::agent::prompt::{SystemPromptBuilder, test_helpers::make_named_tool};
 
         let tools: Vec<Box<dyn crate::tools::Tool>> =
             vec![make_named_tool("shell"), make_named_tool("file_read")];
         let mut ctx = crate::agent::prompt::test_helpers::make_test_ctx(&tools);
         ctx.native_tools = true;
-        let system_prompt = build_system_prompt(&ctx).unwrap();
+        let system_prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
 
         assert!(
             !system_prompt.contains("## Tool Use Protocol"),

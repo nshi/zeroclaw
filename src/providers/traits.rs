@@ -94,10 +94,16 @@ impl ChatResponse {
 }
 
 /// Request payload for provider chat calls.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct ChatRequest<'a> {
     pub messages: &'a [ChatMessage],
     pub tools: Option<&'a [ToolSpec]>,
+    /// The configured prompt builder. Provider calls `build()` to get the system prompt.
+    /// `None` during incremental migration — will become required.
+    pub prompt_builder: Option<&'a crate::agent::prompt::SystemPromptBuilder>,
+    /// The prompt context needed by `build()`.
+    /// `None` during incremental migration — will become required.
+    pub prompt_context: Option<&'a crate::agent::prompt::PromptContext<'a>>,
 }
 
 /// A tool result to feed back to the LLM.
@@ -332,6 +338,17 @@ pub trait Provider: Send + Sync {
         ToolsPayload::PromptGuided {
             instructions: build_tool_instructions_text(tools),
         }
+    }
+
+    /// Provider-specific builder customization hook.
+    /// Called after the builder is configured with defaults and channel/thinking
+    /// sections, but before `build()`. Providers can push, replace, or remove
+    /// sections. Default is a no-op.
+    fn customize_prompt_builder(
+        &self,
+        _builder: &mut crate::agent::prompt::SystemPromptBuilder,
+        _ctx: &crate::agent::prompt::PromptContext<'_>,
+    ) {
     }
 
     /// Simple one-shot chat (single user message, no explicit system prompt).
@@ -888,6 +905,8 @@ mod tests {
         let request = ChatRequest {
             messages: &[ChatMessage::user("Hello")],
             tools: Some(&tools),
+            prompt_builder: None,
+            prompt_context: None,
         };
 
         let response = provider.chat(request, "model", 0.7).await.unwrap();
@@ -905,6 +924,8 @@ mod tests {
         let request = ChatRequest {
             messages: &[ChatMessage::user("Hello")],
             tools: None,
+            prompt_builder: None,
+            prompt_context: None,
         };
 
         let response = provider.chat(request, "model", 0.7).await.unwrap();
@@ -1005,6 +1026,8 @@ mod tests {
                 ChatMessage::system("BASE_SYSTEM_PROMPT"),
             ],
             tools: Some(&tools),
+            prompt_builder: None,
+            prompt_context: None,
         };
 
         let response = provider.chat(request, "model", 0.7).await.unwrap();
@@ -1027,6 +1050,8 @@ mod tests {
         let request = ChatRequest {
             messages: &[ChatMessage::system("BASE"), ChatMessage::user("Hello")],
             tools: Some(&tools),
+            prompt_builder: None,
+            prompt_context: None,
         };
 
         let response = provider.chat(request, "model", 0.7).await.unwrap();
@@ -1049,6 +1074,8 @@ mod tests {
         let request = ChatRequest {
             messages: &[ChatMessage::user("Hello")],
             tools: Some(&tools),
+            prompt_builder: None,
+            prompt_context: None,
         };
 
         let err = provider.chat(request, "model", 0.7).await.unwrap_err();
@@ -1097,6 +1124,8 @@ mod tests {
             ChatRequest {
                 messages: &[ChatMessage::user("hi")],
                 tools: None,
+                prompt_builder: None,
+                prompt_context: None,
             },
             "model",
             0.0,

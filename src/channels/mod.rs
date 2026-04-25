@@ -330,15 +330,16 @@ struct ChannelRuntimeContext {
 }
 
 impl ChannelRuntimeContext {
-    /// Build a complete system prompt for the given per-message context.
-    fn build_system_prompt(
-        &self,
-        model_name: &str,
-        channel_name: &str,
-        reply_target: Option<&str>,
-        skills: &[crate::skills::Skill],
-    ) -> String {
-        let ctx = crate::agent::prompt::PromptContext {
+    /// Construct a `PromptContext` with channel-specific fields populated.
+    fn make_prompt_context<'a>(
+        &'a self,
+        model_name: &'a str,
+        channel_name: &'a str,
+        reply_target: Option<&'a str>,
+        skills: &'a [crate::skills::Skill],
+        memory_context: Option<&'a str>,
+    ) -> crate::agent::prompt::PromptContext<'a> {
+        crate::agent::prompt::PromptContext {
             workspace_dir: self.workspace_dir.as_ref(),
             model_name,
             tools: self.tools_registry.as_ref(),
@@ -355,8 +356,9 @@ impl ChannelRuntimeContext {
             channel_name: Some(channel_name),
             reply_target,
             deferred_tools_text: &self.deferred_tools_text,
-        };
-        crate::agent::prompt::build_system_prompt(&ctx).unwrap_or_default()
+            thinking_directive: None,
+            memory_context,
+        }
     }
 }
 
@@ -978,12 +980,28 @@ fn refreshed_new_session_system_prompt(
     model_name: &str,
     channel_name: &str,
     reply_target: Option<&str>,
+    memory_context: Option<&str>,
 ) -> String {
     let fresh_skills = crate::skills::load_skills_with_config(
         ctx.workspace_dir.as_ref(),
         ctx.prompt_config.as_ref(),
     );
-    ctx.build_system_prompt(model_name, channel_name, reply_target, &fresh_skills)
+    let prompt_ctx = ctx.make_prompt_context(
+        model_name,
+        channel_name,
+        reply_target,
+        &fresh_skills,
+        memory_context,
+    );
+    build_channel_prompt(&prompt_ctx)
+}
+
+/// Build a system prompt for a channel message using the standard builder
+/// with `MemoryContextSection` appended.
+fn build_channel_prompt(ctx: &crate::agent::prompt::PromptContext<'_>) -> String {
+    let mut builder = crate::agent::prompt::SystemPromptBuilder::with_defaults();
+    builder.push_back(Box::new(crate::agent::prompt::MemoryContextSection));
+    builder.build(ctx).unwrap_or_default()
 }
 
 fn compact_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) -> bool {
@@ -2590,19 +2608,29 @@ async fn process_channel_message(
     } else {
         Some(msg.reply_target.as_str())
     };
-    let mut system_prompt = if had_prior_history {
-        ctx.build_system_prompt(&route.model, &msg.channel, reply_target_ref, &ctx.skills)
+    let mem_ctx_ref = if memory_context.is_empty() {
+        None
+    } else {
+        Some(memory_context.as_str())
+    };
+    let system_prompt = if had_prior_history {
+        let prompt_ctx = ctx.make_prompt_context(
+            &route.model,
+            &msg.channel,
+            reply_target_ref,
+            &ctx.skills,
+            mem_ctx_ref,
+        );
+        build_channel_prompt(&prompt_ctx)
     } else {
         refreshed_new_session_system_prompt(
             ctx.as_ref(),
             &route.model,
             &msg.channel,
             reply_target_ref,
+            mem_ctx_ref,
         )
     };
-    if !memory_context.is_empty() {
-        let _ = write!(system_prompt, "\n\n{memory_context}");
-    }
     let mut history = vec![ChatMessage::system(system_prompt)];
     history.extend(prior_turns);
 
@@ -4367,7 +4395,9 @@ mod tests {
         ctx.workspace_dir = workspace_dir;
         ctx.model_name = "model";
         ctx.identity_config = Some(identity_config);
-        crate::agent::prompt::build_system_prompt(&ctx).unwrap()
+        crate::agent::prompt::SystemPromptBuilder::with_defaults()
+            .build(&ctx)
+            .unwrap()
     }
 
     fn make_prompt(workspace_dir: &std::path::Path, model_name: &str) -> String {
@@ -4375,7 +4405,9 @@ mod tests {
         let mut ctx = crate::agent::prompt::test_helpers::make_test_ctx(&tools);
         ctx.workspace_dir = workspace_dir;
         ctx.model_name = model_name;
-        crate::agent::prompt::build_system_prompt(&ctx).unwrap()
+        crate::agent::prompt::SystemPromptBuilder::with_defaults()
+            .build(&ctx)
+            .unwrap()
     }
 
     #[test]
@@ -7785,7 +7817,9 @@ BTC is currently around $65,000 based on latest tool output."#
         prompt_ctx.skills = &initial_skills;
         prompt_ctx.skills_prompt_mode = config.skills.prompt_injection_mode;
         prompt_ctx.identity_config = Some(&config.identity);
-        let initial_system_prompt = crate::agent::prompt::build_system_prompt(&prompt_ctx).unwrap();
+        let initial_system_prompt = crate::agent::prompt::SystemPromptBuilder::with_defaults()
+            .build(&prompt_ctx)
+            .unwrap();
         assert!(
             !initial_system_prompt.contains("refresh-test"),
             "initial prompt should not contain the new skill before it exists"
@@ -7885,6 +7919,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 runtime_ctx.as_ref(),
                 "test-model",
                 "telegram",
+                None,
                 None,
             )
             .contains("<name>refresh-test</name>"),

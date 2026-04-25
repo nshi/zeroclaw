@@ -17,6 +17,7 @@ pub struct AnthropicProvider {
 }
 
 const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 4096;
+const OAUTH_IDENTITY_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 #[derive(Debug, Serialize)]
 struct ChatRequest {
@@ -223,31 +224,6 @@ impl AnthropicProvider {
                 .header("anthropic-dangerous-direct-browser-access", "true")
         } else {
             request.header("x-api-key", credential)
-        }
-    }
-
-    /// For OAuth tokens, Anthropic requires the system prompt to start with the
-    /// Claude Code identity prefix. This prepends it to any existing system prompt.
-    fn apply_oauth_system_prompt(system: Option<SystemPrompt>) -> Option<SystemPrompt> {
-        let prefix = SystemBlock {
-            block_type: "text".to_string(),
-            text: "You are Claude Code, Anthropic's official CLI for Claude.".to_string(),
-            cache_control: Some(CacheControl::ephemeral()),
-        };
-        match system {
-            Some(SystemPrompt::Blocks(mut blocks)) => {
-                blocks.insert(0, prefix);
-                Some(SystemPrompt::Blocks(blocks))
-            }
-            Some(SystemPrompt::String(s)) => Some(SystemPrompt::Blocks(vec![
-                prefix,
-                SystemBlock {
-                    block_type: "text".to_string(),
-                    text: s,
-                    cache_control: Some(CacheControl::ephemeral()),
-                },
-            ])),
-            None => Some(SystemPrompt::Blocks(vec![prefix])),
         }
     }
 
@@ -752,6 +728,22 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
+    fn customize_prompt_builder(
+        &self,
+        builder: &mut crate::agent::prompt::SystemPromptBuilder,
+        _ctx: &crate::agent::prompt::PromptContext<'_>,
+    ) {
+        if let Some(ref cred) = self.credential {
+            if Self::is_setup_token(cred) {
+                builder.push_front(Box::new(
+                    crate::agent::prompt::StaticTextSection::provider_identity(
+                        OAUTH_IDENTITY_PREFIX.to_string(),
+                    ),
+                ));
+            }
+        }
+    }
+
     async fn chat_with_system(
         &self,
         system_prompt: Option<&str>,
@@ -765,11 +757,13 @@ impl Provider for AnthropicProvider {
             )
         })?;
 
-        let system = system_prompt.map(|s| SystemPrompt::String(s.to_string()));
         let system = if Self::is_setup_token(credential) {
-            Self::apply_oauth_system_prompt(system)
+            let base = system_prompt.unwrap_or("");
+            Some(SystemPrompt::String(format!(
+                "{OAUTH_IDENTITY_PREFIX}\n\n{base}"
+            )))
         } else {
-            system
+            system_prompt.map(|s| SystemPrompt::String(s.to_string()))
         };
 
         tracing::debug!(max_tokens = self.max_tokens, model = %model, "Anthropic API request");
@@ -844,12 +838,6 @@ impl Provider for AnthropicProvider {
             None
         };
 
-        // For OAuth tokens, prepend Claude Code identity to system prompt
-        let system_prompt = if Self::is_setup_token(credential) {
-            Self::apply_oauth_system_prompt(system_prompt)
-        } else {
-            system_prompt
-        };
         tracing::debug!(max_tokens = self.max_tokens, model = %model, "Anthropic streaming API request");
         let native_request = NativeChatRequest {
             model: model.to_string(),
@@ -933,6 +921,8 @@ impl Provider for AnthropicProvider {
             } else {
                 Some(&tool_specs)
             },
+            prompt_builder: None,
+            prompt_context: None,
         };
         self.chat(request, model, temperature).await
     }
@@ -996,12 +986,6 @@ impl Provider for AnthropicProvider {
             tool_choice_override.map(|tc| serde_json::json!({ "type": tc }))
         } else {
             None
-        };
-
-        let system_prompt = if Self::is_setup_token(&credential) {
-            Self::apply_oauth_system_prompt(system_prompt)
-        } else {
-            system_prompt
         };
 
         tracing::debug!(max_tokens = self.max_tokens, model = %model, "Anthropic stream_chat request");
@@ -2102,5 +2086,49 @@ mod tests {
                 window[0].role
             );
         }
+    }
+
+    #[test]
+    fn customize_prompt_builder_adds_identity_for_oauth() {
+        use crate::agent::prompt::{SystemPromptBuilder, test_helpers::make_test_ctx};
+        use crate::providers::Provider;
+
+        let provider = AnthropicProvider {
+            credential: Some("sk-ant-oat01-test-token".to_string()),
+            base_url: "https://api.anthropic.com".to_string(),
+            max_tokens: 4096,
+        };
+
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let ctx = make_test_ctx(&tools);
+        let mut builder = SystemPromptBuilder::with_defaults();
+        provider.customize_prompt_builder(&mut builder, &ctx);
+        let prompt = builder.build(&ctx).unwrap();
+        assert!(
+            prompt.contains("You are Claude Code"),
+            "OAuth provider should add identity section"
+        );
+    }
+
+    #[test]
+    fn customize_prompt_builder_noop_for_api_key() {
+        use crate::agent::prompt::{SystemPromptBuilder, test_helpers::make_test_ctx};
+        use crate::providers::Provider;
+
+        let provider = AnthropicProvider {
+            credential: Some("sk-ant-api03-regular-key".to_string()),
+            base_url: "https://api.anthropic.com".to_string(),
+            max_tokens: 4096,
+        };
+
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let ctx = make_test_ctx(&tools);
+        let mut builder = SystemPromptBuilder::with_defaults();
+        provider.customize_prompt_builder(&mut builder, &ctx);
+        let prompt = builder.build(&ctx).unwrap();
+        assert!(
+            !prompt.contains("You are Claude Code"),
+            "API key provider should NOT add identity section"
+        );
     }
 }

@@ -70,17 +70,10 @@ impl OllamaProvider {
         }
     }
 
-    fn prepare_messages(
-        &self,
-        messages: &[ChatMessage],
-        model: &str,
-    ) -> (Vec<OllamaMessage>, Option<bool>) {
-        let mut ollama_messages = convert_chat_messages(messages);
+    fn prepare_messages(&self, messages: &[ChatMessage]) -> (Vec<OllamaMessage>, Option<bool>) {
+        let ollama_messages = convert_chat_messages(messages);
         let reasoning_enabled = self.reasoning_enabled.unwrap_or(false);
         let think = if reasoning_enabled { Some(true) } else { None };
-        if reasoning_enabled && is_gemma_model(model) {
-            inject_thinking_token(&mut ollama_messages);
-        }
         (ollama_messages, think)
     }
 }
@@ -165,16 +158,6 @@ struct OllamaErrorResponse {
 /// thinking mode, rather than (or in addition to) the `think` API parameter.
 fn is_gemma_model(model: &str) -> bool {
     model.to_ascii_lowercase().starts_with("gemma")
-}
-
-/// Prepend the `<|think|>` control token to the first system message.
-///
-/// Gemma 4 (and Gemma 3) activate reasoning when this token appears at the
-/// start of the system prompt. Without it, `think: true` alone has no effect.
-fn inject_thinking_token(messages: &mut [OllamaMessage]) {
-    if let Some(sys) = messages.iter_mut().find(|m| m.role == "system") {
-        sys.content = format!("<|think|>\n{}", sys.content);
-    }
 }
 
 // ── Thinking content extraction ─────────────────────────────────────────────
@@ -587,6 +570,19 @@ fn trace_api_request(request: &OllamaChatRequest) {
 
 #[async_trait]
 impl Provider for OllamaProvider {
+    fn customize_prompt_builder(
+        &self,
+        builder: &mut crate::agent::prompt::SystemPromptBuilder,
+        ctx: &crate::agent::prompt::PromptContext<'_>,
+    ) {
+        let reasoning_enabled = self.reasoning_enabled.unwrap_or(false);
+        if reasoning_enabled && is_gemma_model(ctx.model_name) {
+            builder.push_front(Box::new(
+                crate::agent::prompt::StaticTextSection::thinking_token("<|think|>".to_string()),
+            ));
+        }
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             // Default to prompt-guided tool calling (XML instructions in system
@@ -629,7 +625,7 @@ impl Provider for OllamaProvider {
             chat_messages.push(ChatMessage::system(sys));
         }
         chat_messages.push(ChatMessage::user(message));
-        let (messages, think) = self.prepare_messages(&chat_messages, model);
+        let (messages, think) = self.prepare_messages(&chat_messages);
 
         let request = OllamaChatRequest {
             model: model.to_string(),
@@ -661,7 +657,7 @@ impl Provider for OllamaProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
-        let (ollama_messages, think) = self.prepare_messages(messages, model);
+        let (ollama_messages, think) = self.prepare_messages(messages);
 
         let request = OllamaChatRequest {
             model: model.to_string(),
@@ -698,7 +694,7 @@ impl Provider for OllamaProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ProviderChatResponse> {
-        let (ollama_messages, think) = self.prepare_messages(messages, model);
+        let (ollama_messages, think) = self.prepare_messages(messages);
 
         let api_request = OllamaChatRequest {
             model: model.to_string(),
@@ -752,7 +748,7 @@ impl Provider for OllamaProvider {
         temperature: f64,
         _options: StreamOptions,
     ) -> futures_util::stream::BoxStream<'static, StreamResult<StreamEvent>> {
-        let (ollama_messages, think) = self.prepare_messages(request.messages, model);
+        let (ollama_messages, think) = self.prepare_messages(request.messages);
         let tools = request.tools.map(convert_tool_specs);
 
         let api_request = OllamaChatRequest {
@@ -1053,7 +1049,7 @@ mod tests {
     #[test]
     fn convert_conversation_messages_system_prompt_no_think_prefix() {
         // Message conversion itself never injects thinking tokens.
-        // That happens at request-building time via inject_thinking_token().
+        // That happens via customize_prompt_builder + ThinkingTokenSection.
         let msgs = vec![ConversationMessage::Chat(ChatMessage::system(
             "You are helpful".to_string(),
         ))];
@@ -1558,85 +1554,80 @@ mod tests {
         assert!(!is_gemma_model("my-gemma-finetune"));
     }
 
-    #[test]
-    fn inject_thinking_token_prepends_to_system() {
-        let mut messages = vec![
-            OllamaMessage {
-                role: "system".to_string(),
-                content: "You are helpful".to_string(),
-                images: None,
-                tool_calls: None,
-            },
-            OllamaMessage {
-                role: "user".to_string(),
-                content: "Hi".to_string(),
-                images: None,
-                tool_calls: None,
-            },
-        ];
-        inject_thinking_token(&mut messages);
-        assert!(messages[0].content.starts_with("<|think|>\n"));
-        assert!(messages[0].content.contains("You are helpful"));
-        assert_eq!(messages[1].content, "Hi");
-    }
-
-    #[test]
-    fn inject_thinking_token_noop_without_system() {
-        let mut messages = vec![OllamaMessage {
-            role: "user".to_string(),
-            content: "Hi".to_string(),
-            images: None,
-            tool_calls: None,
-        }];
-        inject_thinking_token(&mut messages);
-        assert_eq!(messages[0].content, "Hi");
-    }
-
     // ── prepare_messages integration ────────────────────────────────────────
 
     #[test]
-    fn prepare_messages_gemma_with_reasoning_injects_token() {
+    fn prepare_messages_sets_think_flag_for_reasoning() {
         let provider = OllamaProvider::new().with_reasoning(Some(true));
         let messages = vec![
             ChatMessage::system("You are helpful"),
             ChatMessage::user("Hello"),
         ];
-        let (ollama_msgs, think) = provider.prepare_messages(&messages, "gemma4");
-        assert!(
-            ollama_msgs[0].content.starts_with("<|think|>\n"),
-            "system prompt should start with <|think|> for gemma: {}",
-            &ollama_msgs[0].content[..30]
-        );
+        let (ollama_msgs, think) = provider.prepare_messages(&messages);
+        // Thinking token injection is now handled by customize_prompt_builder,
+        // not prepare_messages. prepare_messages just sets the think flag.
+        assert_eq!(ollama_msgs[0].content, "You are helpful");
         assert_eq!(think, Some(true));
     }
 
     #[test]
-    fn prepare_messages_gemma_without_reasoning_no_token() {
+    fn prepare_messages_no_think_flag_without_reasoning() {
         let provider = OllamaProvider::new();
         let messages = vec![
             ChatMessage::system("You are helpful"),
             ChatMessage::user("Hello"),
         ];
-        let (ollama_msgs, think) = provider.prepare_messages(&messages, "gemma4");
-        assert!(
-            !ollama_msgs[0].content.contains("<|think|>"),
-            "should not inject token when reasoning is disabled"
-        );
+        let (_ollama_msgs, think) = provider.prepare_messages(&messages);
         assert_eq!(think, None);
     }
 
     #[test]
-    fn prepare_messages_non_gemma_with_reasoning_no_token() {
-        let provider = OllamaProvider::new().with_reasoning(Some(true));
-        let messages = vec![
-            ChatMessage::system("You are helpful"),
-            ChatMessage::user("Hello"),
-        ];
-        let (ollama_msgs, think) = provider.prepare_messages(&messages, "deepseek-r1");
+    fn customize_prompt_builder_adds_thinking_token_for_gemma() {
+        use crate::agent::prompt::{SystemPromptBuilder, test_helpers::make_test_ctx};
+        use crate::providers::Provider;
+
+        let provider = OllamaProvider {
+            base_url: "http://localhost:11434".to_string(),
+            reasoning_enabled: Some(true),
+            timeout_secs: None,
+            max_tokens: None,
+            num_ctx: None,
+        };
+
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let mut ctx = make_test_ctx(&tools);
+        ctx.model_name = "gemma3:27b";
+        let mut builder = SystemPromptBuilder::with_defaults();
+        provider.customize_prompt_builder(&mut builder, &ctx);
+        let prompt = builder.build(&ctx).unwrap();
         assert!(
-            !ollama_msgs[0].content.contains("<|think|>"),
-            "should not inject token for non-gemma models"
+            prompt.starts_with("<|think|>"),
+            "Gemma model with reasoning should get thinking token"
         );
-        assert_eq!(think, Some(true));
+    }
+
+    #[test]
+    fn customize_prompt_builder_noop_for_non_gemma() {
+        use crate::agent::prompt::{SystemPromptBuilder, test_helpers::make_test_ctx};
+        use crate::providers::Provider;
+
+        let provider = OllamaProvider {
+            base_url: "http://localhost:11434".to_string(),
+            reasoning_enabled: Some(true),
+            timeout_secs: None,
+            max_tokens: None,
+            num_ctx: None,
+        };
+
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let mut ctx = make_test_ctx(&tools);
+        ctx.model_name = "llama3:8b";
+        let mut builder = SystemPromptBuilder::with_defaults();
+        provider.customize_prompt_builder(&mut builder, &ctx);
+        let prompt = builder.build(&ctx).unwrap();
+        assert!(
+            !prompt.starts_with("<|think|>"),
+            "Non-gemma model should NOT get thinking token"
+        );
     }
 }

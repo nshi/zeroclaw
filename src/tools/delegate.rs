@@ -1017,28 +1017,30 @@ impl DelegateTool {
             channel_name: None,
             reply_target: None,
             deferred_tools_text: "",
+            thinking_directive: None,
+            memory_context: None,
         };
 
-        let builder = SystemPromptBuilder::default()
-            .add_section(Box::new(crate::agent::prompt::ToolsSection))
-            .add_section(Box::new(crate::agent::prompt::ToolUseProtocolSection))
-            .add_section(Box::new(crate::agent::prompt::SafetySection))
-            .add_section(Box::new(crate::agent::prompt::SkillsSection))
-            .add_section(Box::new(crate::agent::prompt::WorkspaceSection));
-
-        let mut enriched = builder.build(&ctx).unwrap_or_default();
-
+        let mut builder = SystemPromptBuilder::new();
+        builder.push_back(Box::new(crate::agent::prompt::ToolsSection));
+        builder.push_back(Box::new(crate::agent::prompt::ToolUseProtocolSection));
+        builder.push_back(Box::new(crate::agent::prompt::SafetySection));
+        builder.push_back(Box::new(crate::agent::prompt::SkillsSection));
+        builder.push_back(Box::new(crate::agent::prompt::WorkspaceSection));
         if !shell_policy.is_empty() {
-            enriched.push_str(&shell_policy);
-            enriched.push_str("\n\n");
+            builder.push_back(Box::new(crate::agent::prompt::StaticTextSection {
+                section_name: "shell_policy",
+                text: shell_policy,
+            }));
         }
-
-        // Append the operator-configured system_prompt as the identity/role block.
         if let Some(operator_prompt) = agent_config.system_prompt.as_ref() {
-            enriched.push_str(operator_prompt);
-            enriched.push('\n');
+            builder.push_back(Box::new(crate::agent::prompt::StaticTextSection {
+                section_name: "operator_prompt",
+                text: operator_prompt.clone(),
+            }));
         }
 
+        let enriched = builder.build(&ctx).unwrap_or_default();
         let trimmed = enriched.trim().to_string();
         if trimmed.is_empty() {
             None
