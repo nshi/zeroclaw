@@ -29,7 +29,8 @@ pub const AUTONOMY_FULL_TEXT: &str = "\
 - Allowed tools/actions: execute directly, no extra approval needed.\n\
 - You have full access to all configured tools. Use them confidently.\n\
 - Blocked tools/actions: explain the concrete restriction. Never simulate an approval dialog.\n\
-- For genuinely ambiguous requests where multiple valid interpretations exist, use `ask_user` to clarify.";
+- For genuinely ambiguous requests where multiple valid interpretations exist, use `ask_user` to clarify.\n\
+- When you need user input or confirmation: call the `ask_user` tool. Do NOT ask questions as plain text — the user cannot reply to text output.";
 
 pub const AUTONOMY_READONLY_TEXT: &str = "\
 - This runtime is read-only. Write operations will be rejected.\n\

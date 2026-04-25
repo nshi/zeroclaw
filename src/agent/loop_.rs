@@ -2935,7 +2935,7 @@ pub(crate) async fn run_tool_call_loop(
                 pre_nudge_display_text = Some(display_text.clone());
                 pre_nudge_response_text = Some(response_text.clone());
                 history.push(ChatMessage::assistant(response_text.clone()));
-                history.push(ChatMessage::system(nudge));
+                history.push(ChatMessage::user(nudge));
                 continue;
             }
         }
@@ -2973,9 +2973,9 @@ pub(crate) async fn run_tool_call_loop(
                     "iteration": iteration + 1,
                 }),
             );
-            // Push a system nudge so the model has a signal to generate output.
+            // Push a user nudge so the model has a signal to generate output.
             history.push(ChatMessage::assistant(String::new()));
-            history.push(ChatMessage::system(
+            history.push(ChatMessage::user(
                 "Your previous response was empty. Please provide a response to the user's request.".to_string(),
             ));
             continue;
@@ -3379,14 +3379,14 @@ pub(crate) async fn run_tool_call_loop(
                     crate::agent::loop_detector::LoopDetectionResult::Ok => {}
                     crate::agent::loop_detector::LoopDetectionResult::Warning(ref msg) => {
                         tracing::warn!(tool = %tool_name, %msg, "loop detector warning");
-                        // Inject a system nudge so the LLM adjusts strategy.
-                        history.push(ChatMessage::system(format!("[Loop Detection] {msg}")));
+                        // Inject a user nudge so the LLM adjusts strategy.
+                        history.push(ChatMessage::user(format!("[Loop Detection] {msg}")));
                     }
                     crate::agent::loop_detector::LoopDetectionResult::Block(ref msg) => {
                         tracing::warn!(tool = %tool_name, %msg, "loop detector blocked tool call");
                         // Replace the tool output with the block message.
                         // We still continue the loop so the LLM sees the block feedback.
-                        history.push(ChatMessage::system(format!(
+                        history.push(ChatMessage::user(format!(
                             "[Loop Detection — BLOCKED] {msg}"
                         )));
                     }
