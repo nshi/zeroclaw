@@ -4004,6 +4004,24 @@ impl Channel for SlackChannel {
         }
         Ok(())
     }
+
+    fn create_approval_adapter(
+        &self,
+        msg: &ChannelMessage,
+    ) -> Option<Box<dyn crate::approval::ChannelApprovalAdapter>> {
+        // Extract channel_id from the message's reply_target or sender
+        // The channel_id is embedded in the message id: "slack_{channel_id}_{ts}"
+        let channel_id = if let Some(stripped) = msg.id.strip_prefix("slack_") {
+            stripped.split('_').next().unwrap_or(&msg.reply_target)
+        } else {
+            &msg.reply_target
+        };
+        Some(Box::new(crate::approval::SlackApprovalAdapter::new(
+            self.bot_token.clone(),
+            channel_id,
+            msg.thread_ts.clone(),
+        )))
+    }
 }
 
 #[cfg(test)]

@@ -2833,6 +2833,12 @@ async fn process_channel_message(
     let cost_tracking_context = ctx.cost_tracking.clone().map(|state| {
         crate::agent::loop_::ToolLoopCostTrackingContext::new(state.tracker, state.prices)
     });
+    // Create a channel-specific approval adapter for interactive approval prompts.
+    let channel_approval_adapter: Option<Box<dyn crate::approval::ChannelApprovalAdapter>> =
+        target_channel
+            .as_ref()
+            .and_then(|ch| ch.create_approval_adapter(&msg));
+
     let llm_call_start = Instant::now();
     #[allow(clippy::cast_possible_truncation)]
     let elapsed_before_llm_ms = started_at.elapsed().as_millis() as u64;
@@ -2857,7 +2863,7 @@ async fn process_channel_message(
                         route.temperature.unwrap_or(runtime_defaults.temperature),
                         true,
                         Some(&*ctx.approval_manager),
-                        None, // approval_adapter: channels will get adapters in Phase 4
+                        channel_approval_adapter.as_deref(),
                         msg.channel.as_str(),
                         Some(msg.reply_target.as_str()),
                         &ctx.multimodal,
@@ -4289,7 +4295,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         } else {
             None
         },
-        approval_manager: Arc::new(ApprovalManager::for_non_interactive(&config.autonomy)),
+        approval_manager: Arc::new(ApprovalManager::from_config(&config.autonomy)),
         activated_tools: ch_activated_handle,
         cost_tracking: crate::cost::CostTracker::get_or_init_global(
             config.cost.clone(),

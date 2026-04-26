@@ -121,6 +121,355 @@ impl ChannelApprovalAdapter for CliApprovalAdapter {
     }
 }
 
+// ── Telegram Adapter ────────────────────────────────────────────────
+
+/// Approval adapter for Telegram — sends a message and polls for reply-to
+/// correlation.
+pub struct TelegramApprovalAdapter {
+    client: reqwest::Client,
+    api_base: String,
+    bot_token: String,
+    chat_id: String,
+    thread_id: Option<String>,
+}
+
+impl TelegramApprovalAdapter {
+    pub fn new(
+        client: reqwest::Client,
+        api_base: impl Into<String>,
+        bot_token: impl Into<String>,
+        chat_id: impl Into<String>,
+        thread_id: Option<String>,
+    ) -> Self {
+        Self {
+            client,
+            api_base: api_base.into(),
+            bot_token: bot_token.into(),
+            chat_id: chat_id.into(),
+            thread_id,
+        }
+    }
+
+    fn api_url(&self, method: &str) -> String {
+        format!("{}/bot{}/{method}", self.api_base, self.bot_token)
+    }
+}
+
+#[async_trait]
+impl ChannelApprovalAdapter for TelegramApprovalAdapter {
+    async fn send_approval_request(
+        &self,
+        request: &ApprovalRequest,
+    ) -> Result<PendingApproval> {
+        let summary = super::summarize_args(&request.arguments);
+        let mut text = format!(
+            "🔧 Approval needed\n\nTool: {}\nArgs: {}",
+            request.tool_name, summary
+        );
+        if let Some(ref risk) = request.risk_level {
+            text.push_str(&format!("\nRisk: {risk:?}"));
+        }
+        text.push_str("\n\nReply to this message with:\n• y — approve once\n• n — deny\n• a — always approve this tool");
+
+        let mut body = serde_json::json!({
+            "chat_id": self.chat_id,
+            "text": text,
+            "reply_markup": { "force_reply": true, "selective": true }
+        });
+        if let Some(ref tid) = self.thread_id {
+            body["message_thread_id"] = serde_json::Value::String(tid.clone());
+        }
+
+        let resp = self.client
+            .post(self.api_url("sendMessage"))
+            .json(&body)
+            .send()
+            .await?;
+        let json: serde_json::Value = resp.json().await?;
+        let message_id = json["result"]["message_id"]
+            .as_i64()
+            .ok_or_else(|| anyhow::anyhow!("missing message_id in sendMessage response"))? as i32;
+
+        let chat_id = json["result"]["chat"]["id"]
+            .as_i64()
+            .unwrap_or_else(|| self.chat_id.parse::<i64>().unwrap_or(0));
+
+        Ok(PendingApproval {
+            request_id: request.request_id.clone(),
+            platform_ref: PlatformRef::Telegram { chat_id, message_id },
+        })
+    }
+
+    async fn receive_approval_response(
+        &self,
+        pending: &PendingApproval,
+    ) -> Result<ApprovalResponse> {
+        let (expected_chat_id, expected_msg_id) = match &pending.platform_ref {
+            PlatformRef::Telegram { chat_id, message_id } => (*chat_id, *message_id),
+            _ => anyhow::bail!("TelegramApprovalAdapter got non-Telegram PlatformRef"),
+        };
+
+        let mut offset: i64 = 0;
+        loop {
+            let resp = self.client
+                .post(self.api_url("getUpdates"))
+                .json(&serde_json::json!({
+                    "offset": offset,
+                    "timeout": 5,
+                    "allowed_updates": ["message"]
+                }))
+                .send()
+                .await?;
+            let json: serde_json::Value = resp.json().await?;
+
+            if let Some(updates) = json["result"].as_array() {
+                for update in updates {
+                    if let Some(uid) = update["update_id"].as_i64() {
+                        offset = uid + 1;
+                    }
+                    let msg = &update["message"];
+                    let reply_to = &msg["reply_to_message"];
+                    let reply_msg_id = reply_to["message_id"].as_i64().unwrap_or(-1) as i32;
+                    let chat_id = msg["chat"]["id"].as_i64().unwrap_or(0);
+
+                    if reply_msg_id == expected_msg_id && chat_id == expected_chat_id {
+                        let text = msg["text"].as_str().unwrap_or("");
+                        return Ok(super::parse_approval_input(text));
+                    }
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    fn channel_name(&self) -> &str {
+        "telegram"
+    }
+}
+
+// ── Slack Adapter ───────────────────────────────────────────────────
+
+/// Approval adapter for Slack — sends a thread reply and polls for responses.
+pub struct SlackApprovalAdapter {
+    bot_token: String,
+    channel_id: String,
+    thread_ts: Option<String>,
+}
+
+impl SlackApprovalAdapter {
+    pub fn new(
+        bot_token: impl Into<String>,
+        channel_id: impl Into<String>,
+        thread_ts: Option<String>,
+    ) -> Self {
+        Self {
+            bot_token: bot_token.into(),
+            channel_id: channel_id.into(),
+            thread_ts,
+        }
+    }
+}
+
+#[async_trait]
+impl ChannelApprovalAdapter for SlackApprovalAdapter {
+    async fn send_approval_request(
+        &self,
+        request: &ApprovalRequest,
+    ) -> Result<PendingApproval> {
+        let summary = super::summarize_args(&request.arguments);
+        let mut text = format!(
+            "🔧 Approval needed\n\nTool: {}\nArgs: {}",
+            request.tool_name, summary
+        );
+        if let Some(ref risk) = request.risk_level {
+            text.push_str(&format!("\nRisk: {risk:?}"));
+        }
+        text.push_str("\n\nReply in this thread with:\n• y — approve once\n• n — deny\n• a — always approve this tool");
+
+        let client = reqwest::Client::new();
+        let mut body = serde_json::json!({
+            "channel": self.channel_id,
+            "text": text,
+        });
+        if let Some(ref ts) = self.thread_ts {
+            body["thread_ts"] = serde_json::Value::String(ts.clone());
+        }
+
+        let resp = client
+            .post("https://slack.com/api/chat.postMessage")
+            .bearer_auth(&self.bot_token)
+            .json(&body)
+            .send()
+            .await?;
+        let json: serde_json::Value = resp.json().await?;
+
+        let ts = json["ts"]
+            .as_str()
+            .or_else(|| json["message"]["ts"].as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing ts in Slack postMessage response"))?
+            .to_string();
+
+        Ok(PendingApproval {
+            request_id: request.request_id.clone(),
+            platform_ref: PlatformRef::Slack {
+                channel_id: self.channel_id.clone(),
+                thread_ts: ts,
+            },
+        })
+    }
+
+    async fn receive_approval_response(
+        &self,
+        pending: &PendingApproval,
+    ) -> Result<ApprovalResponse> {
+        let (channel_id, thread_ts) = match &pending.platform_ref {
+            PlatformRef::Slack { channel_id, thread_ts } => (channel_id.clone(), thread_ts.clone()),
+            _ => anyhow::bail!("SlackApprovalAdapter got non-Slack PlatformRef"),
+        };
+
+        let client = reqwest::Client::new();
+        loop {
+            let resp = client
+                .get("https://slack.com/api/conversations.replies")
+                .bearer_auth(&self.bot_token)
+                .query(&[
+                    ("channel", channel_id.as_str()),
+                    ("ts", thread_ts.as_str()),
+                    ("limit", "10"),
+                ])
+                .send()
+                .await?;
+            let json: serde_json::Value = resp.json().await?;
+
+            if let Some(messages) = json["messages"].as_array() {
+                for msg in messages {
+                    let msg_ts = msg["ts"].as_str().unwrap_or("");
+                    // Only consider replies after the approval message
+                    if msg_ts > thread_ts.as_str() {
+                        let text = msg["text"].as_str().unwrap_or("");
+                        return Ok(super::parse_approval_input(text));
+                    }
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    }
+
+    fn channel_name(&self) -> &str {
+        "slack"
+    }
+}
+
+// ── Gateway (WebSocket) Adapter ─────────────────────────────────────
+
+/// Approval adapter for the WebSocket gateway — sends JSON frames and
+/// waits for a matching `approval_response` frame via a oneshot channel.
+pub struct GatewayApprovalAdapter {
+    frame_tx: tokio::sync::mpsc::Sender<String>,
+    pending_responses: std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, tokio::sync::oneshot::Sender<ApprovalResponse>>,
+        >,
+    >,
+    response_rx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<ApprovalResponse>>>,
+}
+
+impl GatewayApprovalAdapter {
+    pub fn new(
+        frame_tx: tokio::sync::mpsc::Sender<String>,
+        pending_responses: std::sync::Arc<
+            tokio::sync::Mutex<
+                std::collections::HashMap<
+                    String,
+                    tokio::sync::oneshot::Sender<ApprovalResponse>,
+                >,
+            >,
+        >,
+    ) -> Self {
+        Self {
+            frame_tx,
+            pending_responses,
+            response_rx: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Resolve an incoming `approval_response` frame from the WebSocket client.
+    ///
+    /// Called by the WebSocket receive loop when it sees a frame with
+    /// `{"type":"approval_response", "request_id":"...", "decision":"..."}`.
+    pub async fn resolve_approval_response(
+        pending: &std::sync::Arc<
+            tokio::sync::Mutex<
+                std::collections::HashMap<
+                    String,
+                    tokio::sync::oneshot::Sender<ApprovalResponse>,
+                >,
+            >,
+        >,
+        request_id: &str,
+        decision: &str,
+    ) -> bool {
+        let mut map = pending.lock().await;
+        if let Some(tx) = map.remove(request_id) {
+            let response = super::parse_approval_input(decision);
+            tx.send(response).is_ok()
+        } else {
+            false
+        }
+    }
+}
+
+#[async_trait]
+impl ChannelApprovalAdapter for GatewayApprovalAdapter {
+    async fn send_approval_request(
+        &self,
+        request: &ApprovalRequest,
+    ) -> Result<PendingApproval> {
+        let frame = serde_json::json!({
+            "type": "approval_request",
+            "request_id": request.request_id,
+            "tool_name": request.tool_name,
+            "arguments": request.arguments,
+            "risk_level": request.risk_level,
+        });
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut map = self.pending_responses.lock().await;
+            map.insert(request.request_id.clone(), tx);
+        }
+        *self.response_rx.lock().await = Some(rx);
+
+        self.frame_tx
+            .send(frame.to_string())
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to send approval frame: {e}"))?;
+
+        Ok(PendingApproval {
+            request_id: request.request_id.clone(),
+            platform_ref: PlatformRef::Gateway {
+                connection_id: request.request_id.clone(),
+            },
+        })
+    }
+
+    async fn receive_approval_response(
+        &self,
+        _pending: &PendingApproval,
+    ) -> Result<ApprovalResponse> {
+        let rx = self.response_rx.lock().await.take()
+            .ok_or_else(|| anyhow::anyhow!("no pending approval response receiver"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("approval response channel closed"))
+    }
+
+    fn channel_name(&self) -> &str {
+        "gateway"
+    }
+}
+
 // ── Test fixtures ───────────────────────────────────────────────────
 
 #[cfg(test)]

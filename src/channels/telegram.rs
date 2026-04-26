@@ -3022,6 +3022,24 @@ Ensure only one `mentat` process is using this bot token."
         }
         Ok(())
     }
+
+    fn create_approval_adapter(
+        &self,
+        msg: &ChannelMessage,
+    ) -> Option<Box<dyn crate::approval::ChannelApprovalAdapter>> {
+        // Extract chat_id from reply_target (format: "chat_id" or "chat_id:thread_id")
+        let (chat_id, thread_id) = match msg.reply_target.split_once(':') {
+            Some((chat, thread)) => (chat.to_string(), Some(thread.to_string())),
+            None => (msg.reply_target.clone(), None),
+        };
+        Some(Box::new(crate::approval::TelegramApprovalAdapter::new(
+            self.http_client(),
+            self.api_base.clone(),
+            self.bot_token.clone(),
+            chat_id,
+            thread_id,
+        )))
+    }
 }
 
 #[cfg(test)]

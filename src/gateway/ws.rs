@@ -525,6 +525,119 @@ async fn process_chat_message(
     }
 }
 
+// ── GatewayApprovalAdapter ───────────────────────────────────────────────────
+
+use crate::approval::{
+    ApprovalRequest, ApprovalResponse,
+    adapter::{ChannelApprovalAdapter, PendingApproval, PlatformRef},
+};
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{Mutex, oneshot};
+
+/// Approval adapter for the WebSocket gateway channel.
+///
+/// Sends an `approval_request` JSON frame to the connected client and waits
+/// for an `approval_response` frame routed back via [`resolve_approval_response`].
+pub struct GatewayApprovalAdapter {
+    /// Channel for sending JSON frames to the WebSocket client.
+    frame_tx: tokio::sync::mpsc::Sender<String>,
+    /// Registry of pending oneshot senders, keyed by request_id.
+    pending_responses: Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalResponse>>>>,
+    /// Receiver for the most recently sent approval request.
+    response_rx: Mutex<Option<oneshot::Receiver<ApprovalResponse>>>,
+}
+
+impl GatewayApprovalAdapter {
+    pub fn new(
+        frame_tx: tokio::sync::mpsc::Sender<String>,
+        pending_responses: Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalResponse>>>>,
+    ) -> Self {
+        Self {
+            frame_tx,
+            pending_responses,
+            response_rx: Mutex::new(None),
+        }
+    }
+
+    /// Route an `approval_response` frame from the WebSocket receive loop back
+    /// to the waiting [`receive_approval_response`] call.
+    ///
+    /// Returns `true` if the request_id was found and the response delivered.
+    pub async fn resolve_approval_response(
+        pending: &Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalResponse>>>>,
+        request_id: &str,
+        decision: &str,
+    ) -> bool {
+        let response = crate::approval::parse_approval_input(decision);
+        let mut map = pending.lock().await;
+        if let Some(tx) = map.remove(request_id) {
+            let _ = tx.send(response);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[async_trait]
+impl ChannelApprovalAdapter for GatewayApprovalAdapter {
+    async fn send_approval_request(&self, request: &ApprovalRequest) -> anyhow::Result<PendingApproval> {
+        let request_id = request.request_id.clone();
+
+        // Build the approval_request frame.
+        let frame = serde_json::json!({
+            "type": "approval_request",
+            "request_id": request_id,
+            "tool_name": request.tool_name,
+            "arguments": request.arguments,
+            "risk_level": request.risk_level.as_ref().map(|r| format!("{r:?}").to_ascii_lowercase()),
+            "timeout_secs": 120,
+        });
+
+        // Register the oneshot sender before sending the frame to avoid a race.
+        let (tx, rx) = oneshot::channel::<ApprovalResponse>();
+        {
+            let mut map = self.pending_responses.lock().await;
+            map.insert(request_id.clone(), tx);
+        }
+
+        // Store the receiver so receive_approval_response can pick it up.
+        {
+            let mut slot = self.response_rx.lock().await;
+            *slot = Some(rx);
+        }
+
+        self.frame_tx
+            .send(frame.to_string())
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to send approval frame: {e}"))?;
+
+        Ok(PendingApproval {
+            request_id: request_id.clone(),
+            platform_ref: PlatformRef::Gateway { connection_id: request_id },
+        })
+    }
+
+    async fn receive_approval_response(
+        &self,
+        _pending: &PendingApproval,
+    ) -> anyhow::Result<ApprovalResponse> {
+        let rx = {
+            let mut slot = self.response_rx.lock().await;
+            slot.take().ok_or_else(|| anyhow::anyhow!("no pending approval receiver"))?
+        };
+
+        rx.await
+            .map_err(|_| anyhow::anyhow!("approval channel closed before response arrived"))
+    }
+
+    fn channel_name(&self) -> &str {
+        "gateway"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
