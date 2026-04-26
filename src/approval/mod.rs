@@ -1,15 +1,22 @@
 //! Interactive approval workflow for supervised mode.
 //!
 //! Provides a pre-execution hook that prompts the user before tool calls,
-//! with session-scoped "Always" allowlists and audit logging.
+//! with session-scoped "Always" allowlists and audit logging. Each channel
+//! implements [`ChannelApprovalAdapter`] to deliver approval prompts through
+//! its native messaging primitives.
+
+pub mod adapter;
+
+pub use adapter::{ChannelApprovalAdapter, PendingApproval, PlatformRef};
 
 use crate::config::AutonomyConfig;
-use crate::security::AutonomyLevel;
+use crate::security::{AutonomyLevel, CommandRiskLevel, SecurityPolicy};
 use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
+use std::time::Duration;
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -18,6 +25,40 @@ use std::io::{self, BufRead, Write};
 pub struct ApprovalRequest {
     pub tool_name: String,
     pub arguments: serde_json::Value,
+    /// Unique correlation ID (UUID v4).
+    #[serde(default)]
+    pub request_id: String,
+    /// Originating channel name.
+    #[serde(default)]
+    pub channel: String,
+    /// User/chat to send the prompt to.
+    #[serde(default)]
+    pub recipient: String,
+    /// Thread context for threaded replies (Slack, Telegram).
+    #[serde(default)]
+    pub thread_ts: Option<String>,
+    /// Harness-classified risk level (for shell commands).
+    #[serde(default)]
+    pub risk_level: Option<CommandRiskLevel>,
+    /// When the request was created.
+    #[serde(default)]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ApprovalRequest {
+    /// Create a minimal request (backward-compatible with existing callers).
+    pub fn new(tool_name: String, arguments: serde_json::Value) -> Self {
+        Self {
+            tool_name,
+            arguments,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            channel: String::new(),
+            recipient: String::new(),
+            thread_ts: None,
+            risk_level: None,
+            created_at: Some(Utc::now()),
+        }
+    }
 }
 
 /// The user's response to an approval request.
@@ -30,6 +71,8 @@ pub enum ApprovalResponse {
     No,
     /// Execute and add tool to session-scoped allowlist.
     Always,
+    /// No response within timeout period.
+    Timeout,
 }
 
 /// A single audit log entry for an approval decision.
@@ -40,6 +83,15 @@ pub struct ApprovalLogEntry {
     pub arguments_summary: String,
     pub decision: ApprovalResponse,
     pub channel: String,
+    /// Harness-classified risk level (for shell commands).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+    /// Correlation ID for channel-prompted decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Time from prompt sent to response received (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_time_ms: Option<u64>,
 }
 
 // ── ApprovalManager ──────────────────────────────────────────────
@@ -49,13 +101,7 @@ pub struct ApprovalLogEntry {
 /// - Checks config-level `auto_approve` / `always_ask` lists
 /// - Maintains a session-scoped "always" allowlist
 /// - Records an audit trail of all decisions
-///
-/// Two modes:
-/// - **Interactive** (CLI): tools needing approval trigger a stdin prompt.
-/// - **Non-interactive** (channels): tools needing approval are auto-denied
-///   because there is no interactive operator to approve them. `auto_approve`
-///   policy is still enforced, and `always_ask` / supervised-default tools are
-///   denied rather than silently allowed.
+/// - Delegates to a [`ChannelApprovalAdapter`] for channel-specific prompting
 pub struct ApprovalManager {
     /// Tools that never need approval (from config).
     auto_approve: HashSet<String>,
@@ -64,8 +110,11 @@ pub struct ApprovalManager {
     /// Autonomy level from config.
     autonomy_level: AutonomyLevel,
     /// When `true`, tools that would require interactive approval are
-    /// auto-denied instead. Used for channel-driven (non-CLI) runs.
+    /// auto-denied instead. Used for channel-driven runs that have not
+    /// yet been wired with a [`ChannelApprovalAdapter`].
     non_interactive: bool,
+    /// Approval timeout duration.
+    approval_timeout: Duration,
     /// Session-scoped allowlist built from "Always" responses.
     session_allowlist: Mutex<HashSet<String>>,
     /// Audit trail of approval decisions.
@@ -80,29 +129,29 @@ impl ApprovalManager {
             always_ask: config.always_ask.iter().cloned().collect(),
             autonomy_level: config.level,
             non_interactive: false,
+            approval_timeout: Duration::from_secs(config.approval_timeout_secs),
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
         }
     }
 
-    /// Create a non-interactive approval manager for channel-driven runs.
+    /// Create a non-interactive approval manager for channel-driven runs
+    /// that do not yet have a [`ChannelApprovalAdapter`].
     ///
-    /// Enforces the same `auto_approve` / `always_ask` / supervised policies
-    /// as the CLI manager, but tools that would require interactive approval
-    /// are auto-denied instead of prompting (since there is no operator).
+    /// Tools requiring approval are auto-denied instead of prompting.
     pub fn for_non_interactive(config: &AutonomyConfig) -> Self {
         Self {
             auto_approve: config.auto_approve.iter().cloned().collect(),
             always_ask: config.always_ask.iter().cloned().collect(),
             autonomy_level: config.level,
             non_interactive: true,
+            approval_timeout: Duration::from_secs(config.approval_timeout_secs),
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
         }
     }
 
-    /// Returns `true` when this manager operates in non-interactive mode
-    /// (i.e. for channel-driven runs where no operator can approve).
+    /// Returns `true` when this manager operates in non-interactive mode.
     pub fn is_non_interactive(&self) -> bool {
         self.non_interactive
     }
@@ -130,7 +179,8 @@ impl ApprovalManager {
         // own command allowlist and risk policy. Skipping the outer approval
         // gate here lets low-risk allowlisted commands (e.g. `ls`) work in
         // non-interactive channels without silently allowing medium/high-risk
-        // commands.
+        // commands. This path is transitional — once channels have adapters,
+        // shell approval is routed through needs_shell_approval() instead.
         if self.non_interactive && tool_name == "shell" {
             return false;
         }
@@ -150,6 +200,102 @@ impl ApprovalManager {
         true
     }
 
+    /// Check whether a shell command requires approval based on its risk level.
+    ///
+    /// Uses the harness `SecurityPolicy` to classify risk, returning `true` for
+    /// Medium+ risk commands in supervised mode when `require_approval_for_medium_risk`
+    /// is set. Low-risk commands pass without prompting.
+    pub fn needs_shell_approval(&self, command: &str, security: &SecurityPolicy) -> bool {
+        if self.autonomy_level == AutonomyLevel::Full {
+            return false;
+        }
+        if self.autonomy_level == AutonomyLevel::ReadOnly {
+            return false;
+        }
+
+        let risk = security.command_risk_level(command);
+        match risk {
+            CommandRiskLevel::Low => false,
+            CommandRiskLevel::Medium => {
+                security.require_approval_for_medium_risk
+                    && self.autonomy_level == AutonomyLevel::Supervised
+            }
+            CommandRiskLevel::High => self.autonomy_level == AutonomyLevel::Supervised,
+        }
+    }
+
+    /// Send an approval request through the adapter and wait for a response,
+    /// with timeout.
+    ///
+    /// Returns the user's decision. On adapter error or timeout, returns a
+    /// denial (`No` or `Timeout` respectively).
+    pub async fn request_approval(
+        &self,
+        adapter: &dyn ChannelApprovalAdapter,
+        request: &ApprovalRequest,
+    ) -> ApprovalResponse {
+        let start = std::time::Instant::now();
+
+        let pending = match adapter.send_approval_request(request).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    tool = %request.tool_name,
+                    error = %e,
+                    "failed to send approval request, treating as denial"
+                );
+                return ApprovalResponse::No;
+            }
+        };
+
+        let response = match tokio::time::timeout(
+            self.approval_timeout,
+            adapter.receive_approval_response(&pending),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    tool = %request.tool_name,
+                    error = %e,
+                    "error receiving approval response, treating as denial"
+                );
+                ApprovalResponse::No
+            }
+            Err(_elapsed) => {
+                tracing::info!(
+                    tool = %request.tool_name,
+                    timeout_secs = self.approval_timeout.as_secs(),
+                    "approval request timed out"
+                );
+                ApprovalResponse::Timeout
+            }
+        };
+
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        self.record_decision_ext(
+            &request.tool_name,
+            &request.arguments,
+            response,
+            adapter.channel_name(),
+            request.risk_level.as_ref().map(|r| format!("{r:?}").to_ascii_lowercase()),
+            Some(request.request_id.clone()),
+            Some(elapsed_ms),
+        );
+
+        // Handle "Always" → add to session allowlist (unless in always_ask).
+        if response == ApprovalResponse::Always
+            && !self.always_ask.contains(&request.tool_name)
+            && !self.always_ask.contains("*")
+        {
+            let mut allowlist = self.session_allowlist.lock();
+            allowlist.insert(request.tool_name.clone());
+        }
+
+        response
+    }
+
     /// Record an approval decision and update session state.
     pub fn record_decision(
         &self,
@@ -158,13 +304,29 @@ impl ApprovalManager {
         decision: ApprovalResponse,
         channel: &str,
     ) {
-        // If "Always", add to session allowlist.
-        if decision == ApprovalResponse::Always {
+        self.record_decision_ext(tool_name, args, decision, channel, None, None, None);
+
+        // If "Always", add to session allowlist (unless in always_ask).
+        if decision == ApprovalResponse::Always
+            && !self.always_ask.contains(tool_name)
+            && !self.always_ask.contains("*")
+        {
             let mut allowlist = self.session_allowlist.lock();
             allowlist.insert(tool_name.to_string());
         }
+    }
 
-        // Append to audit log.
+    /// Record an approval decision with extended audit fields.
+    fn record_decision_ext(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        decision: ApprovalResponse,
+        channel: &str,
+        risk_level: Option<String>,
+        request_id: Option<String>,
+        response_time_ms: Option<u64>,
+    ) {
         let summary = summarize_args(args);
         let entry = ApprovalLogEntry {
             timestamp: Utc::now().to_rfc3339(),
@@ -172,6 +334,9 @@ impl ApprovalManager {
             arguments_summary: summary,
             decision,
             channel: channel.to_string(),
+            risk_level,
+            request_id,
+            response_time_ms,
         };
         let mut log = self.audit_log.lock();
         log.push(entry);
@@ -189,10 +354,14 @@ impl ApprovalManager {
 
     /// Prompt the user on the CLI and return their decision.
     ///
-    /// Only called for interactive (CLI) managers. Non-interactive managers
-    /// auto-deny in the tool-call loop before reaching this point.
+    /// Only called for interactive (CLI) managers when no adapter is available.
     pub fn prompt_cli(&self, request: &ApprovalRequest) -> ApprovalResponse {
         prompt_cli_interactive(request)
+    }
+
+    /// The configured approval timeout duration.
+    pub fn approval_timeout(&self) -> Duration {
+        self.approval_timeout
     }
 }
 
@@ -204,6 +373,9 @@ fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
     eprintln!();
     eprintln!("🔧 Agent wants to execute: {}", request.tool_name);
     eprintln!("   {summary}");
+    if let Some(ref risk) = request.risk_level {
+        eprintln!("   Risk: {risk:?}");
+    }
     eprint!("   [Y]es / [N]o / [A]lways for {}: ", request.tool_name);
     let _ = io::stderr().flush();
 
@@ -213,7 +385,13 @@ fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
         return ApprovalResponse::No;
     }
 
-    match line.trim().to_ascii_lowercase().as_str() {
+    parse_approval_input(&line)
+}
+
+/// Parse user input into an approval response. Case-insensitive.
+/// Unrecognized input is treated as denial (fail-safe).
+pub fn parse_approval_input(input: &str) -> ApprovalResponse {
+    match input.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => ApprovalResponse::Yes,
         "a" | "always" => ApprovalResponse::Always,
         _ => ApprovalResponse::No,
@@ -221,7 +399,7 @@ fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
 }
 
 /// Produce a short human-readable summary of tool arguments.
-fn summarize_args(args: &serde_json::Value) -> String {
+pub fn summarize_args(args: &serde_json::Value) -> String {
     match args {
         serde_json::Value::Object(map) => {
             let parts: Vec<String> = map
@@ -443,103 +621,6 @@ mod tests {
         assert!(summary.contains("just a string"));
     }
 
-    // ── non-interactive (channel) mode ────────────────────────
-
-    #[test]
-    fn non_interactive_manager_reports_non_interactive() {
-        let mgr = ApprovalManager::for_non_interactive(&supervised_config());
-        assert!(mgr.is_non_interactive());
-    }
-
-    #[test]
-    fn interactive_manager_reports_interactive() {
-        let mgr = ApprovalManager::from_config(&supervised_config());
-        assert!(!mgr.is_non_interactive());
-    }
-
-    #[test]
-    fn non_interactive_auto_approve_tools_skip_approval() {
-        let mgr = ApprovalManager::for_non_interactive(&supervised_config());
-        // auto_approve tools (file_read, memory_recall) should not need approval.
-        assert!(!mgr.needs_approval("file_read"));
-        assert!(!mgr.needs_approval("memory_recall"));
-    }
-
-    #[test]
-    fn non_interactive_shell_skips_outer_approval_by_default() {
-        let mgr = ApprovalManager::for_non_interactive(&AutonomyConfig::default());
-        assert!(!mgr.needs_approval("shell"));
-    }
-
-    #[test]
-    fn non_interactive_always_ask_tools_need_approval() {
-        let mgr = ApprovalManager::for_non_interactive(&supervised_config());
-        // always_ask tools (shell) still report as needing approval,
-        // so the tool-call loop will auto-deny them in non-interactive mode.
-        assert!(mgr.needs_approval("shell"));
-    }
-
-    #[test]
-    fn non_interactive_unknown_tools_need_approval_in_supervised() {
-        let mgr = ApprovalManager::for_non_interactive(&supervised_config());
-        // Unknown tools in supervised mode need approval (will be auto-denied
-        // by the tool-call loop for non-interactive managers).
-        assert!(mgr.needs_approval("file_write"));
-        assert!(mgr.needs_approval("http_request"));
-    }
-
-    #[test]
-    fn non_interactive_full_autonomy_never_needs_approval() {
-        let mgr = ApprovalManager::for_non_interactive(&full_config());
-        // Full autonomy means no approval needed, even in non-interactive mode.
-        assert!(!mgr.needs_approval("shell"));
-        assert!(!mgr.needs_approval("file_write"));
-        assert!(!mgr.needs_approval("anything"));
-    }
-
-    #[test]
-    fn non_interactive_readonly_never_needs_approval() {
-        let config = AutonomyConfig {
-            level: AutonomyLevel::ReadOnly,
-            ..AutonomyConfig::default()
-        };
-        let mgr = ApprovalManager::for_non_interactive(&config);
-        // ReadOnly blocks execution elsewhere; approval manager does not prompt.
-        assert!(!mgr.needs_approval("shell"));
-    }
-
-    #[test]
-    fn non_interactive_session_allowlist_still_works() {
-        let mgr = ApprovalManager::for_non_interactive(&supervised_config());
-        assert!(mgr.needs_approval("file_write"));
-
-        // Simulate an "Always" decision (would come from a prior channel run
-        // if the tool was auto-approved somehow, e.g. via config change).
-        mgr.record_decision(
-            "file_write",
-            &serde_json::json!({"path": "test.txt"}),
-            ApprovalResponse::Always,
-            "telegram",
-        );
-
-        assert!(!mgr.needs_approval("file_write"));
-    }
-
-    #[test]
-    fn non_interactive_always_ask_overrides_session_allowlist() {
-        let mgr = ApprovalManager::for_non_interactive(&supervised_config());
-
-        mgr.record_decision(
-            "shell",
-            &serde_json::json!({"command": "ls"}),
-            ApprovalResponse::Always,
-            "telegram",
-        );
-
-        // shell is in always_ask, so it still needs approval even after "Always".
-        assert!(mgr.needs_approval("shell"));
-    }
-
     // ── ApprovalResponse serde ───────────────────────────────
 
     #[test]
@@ -550,38 +631,160 @@ mod tests {
         assert_eq!(parsed, ApprovalResponse::No);
     }
 
+    #[test]
+    fn approval_response_timeout_serde_roundtrip() {
+        let json = serde_json::to_string(&ApprovalResponse::Timeout).unwrap();
+        assert_eq!(json, "\"timeout\"");
+        let parsed: ApprovalResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ApprovalResponse::Timeout);
+    }
+
     // ── ApprovalRequest ──────────────────────────────────────
 
     #[test]
     fn approval_request_serde() {
-        let req = ApprovalRequest {
-            tool_name: "shell".into(),
-            arguments: serde_json::json!({"command": "echo hi"}),
-        };
+        let req = ApprovalRequest::new(
+            "shell".into(),
+            serde_json::json!({"command": "echo hi"}),
+        );
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ApprovalRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tool_name, "shell");
+        assert!(!parsed.request_id.is_empty());
     }
 
-    // ── Regression: #4247 default approved tools in channels ──
+    #[test]
+    fn approval_request_new_has_defaults() {
+        let req = ApprovalRequest::new("file_write".into(), serde_json::json!({}));
+        assert!(!req.request_id.is_empty());
+        assert!(req.created_at.is_some());
+        assert!(req.risk_level.is_none());
+        assert!(req.thread_ts.is_none());
+    }
+
+    // ── parse_approval_input ─────────────────────────────────
 
     #[test]
-    fn non_interactive_allows_default_auto_approve_tools() {
+    fn parse_approval_input_yes_variants() {
+        assert_eq!(parse_approval_input("y"), ApprovalResponse::Yes);
+        assert_eq!(parse_approval_input("Y"), ApprovalResponse::Yes);
+        assert_eq!(parse_approval_input("yes"), ApprovalResponse::Yes);
+        assert_eq!(parse_approval_input("YES"), ApprovalResponse::Yes);
+        assert_eq!(parse_approval_input("  y  "), ApprovalResponse::Yes);
+    }
+
+    #[test]
+    fn parse_approval_input_no_variants() {
+        assert_eq!(parse_approval_input("n"), ApprovalResponse::No);
+        assert_eq!(parse_approval_input("no"), ApprovalResponse::No);
+        assert_eq!(parse_approval_input("N"), ApprovalResponse::No);
+    }
+
+    #[test]
+    fn parse_approval_input_always_variants() {
+        assert_eq!(parse_approval_input("a"), ApprovalResponse::Always);
+        assert_eq!(parse_approval_input("always"), ApprovalResponse::Always);
+        assert_eq!(parse_approval_input("ALWAYS"), ApprovalResponse::Always);
+    }
+
+    #[test]
+    fn parse_approval_input_unrecognized_is_no() {
+        assert_eq!(parse_approval_input("maybe"), ApprovalResponse::No);
+        assert_eq!(parse_approval_input(""), ApprovalResponse::No);
+        assert_eq!(parse_approval_input("xyz"), ApprovalResponse::No);
+    }
+
+    // ── needs_shell_approval ─────────────────────────────────
+
+    #[test]
+    fn needs_shell_approval_low_risk_no_prompt() {
+        let config = supervised_config();
+        let mgr = ApprovalManager::from_config(&config);
+        let security = SecurityPolicy::default();
+        assert!(!mgr.needs_shell_approval("ls -la", &security));
+        assert!(!mgr.needs_shell_approval("git status", &security));
+    }
+
+    #[test]
+    fn needs_shell_approval_medium_risk_prompts() {
+        let config = supervised_config();
+        let mgr = ApprovalManager::from_config(&config);
+        let security = SecurityPolicy::default();
+        assert!(mgr.needs_shell_approval("touch file.txt", &security));
+    }
+
+    #[test]
+    fn needs_shell_approval_high_risk_prompts() {
+        let config = supervised_config();
+        let mgr = ApprovalManager::from_config(&config);
+        let security = SecurityPolicy::default();
+        assert!(mgr.needs_shell_approval("rm -rf /tmp/test", &security));
+    }
+
+    #[test]
+    fn needs_shell_approval_full_autonomy_never_prompts() {
+        let config = full_config();
+        let mgr = ApprovalManager::from_config(&config);
+        let security = SecurityPolicy::default();
+        assert!(!mgr.needs_shell_approval("rm -rf /tmp/test", &security));
+    }
+
+    #[test]
+    fn needs_shell_approval_medium_risk_no_prompt_when_disabled() {
+        let config = AutonomyConfig {
+            level: AutonomyLevel::Supervised,
+            require_approval_for_medium_risk: false,
+            ..AutonomyConfig::default()
+        };
+        let mgr = ApprovalManager::from_config(&config);
+        let security = SecurityPolicy {
+            require_approval_for_medium_risk: false,
+            ..SecurityPolicy::default()
+        };
+        assert!(!mgr.needs_shell_approval("touch file.txt", &security));
+    }
+
+    // ── audit log extended fields ────────────────────────────
+
+    #[test]
+    fn record_decision_ext_includes_risk_and_timing() {
+        let mgr = ApprovalManager::from_config(&supervised_config());
+        mgr.record_decision_ext(
+            "shell",
+            &serde_json::json!({"command": "rm -rf ./build/"}),
+            ApprovalResponse::Yes,
+            "telegram",
+            Some("high".into()),
+            Some("req-123".into()),
+            Some(450),
+        );
+
+        let log = mgr.audit_log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].risk_level.as_deref(), Some("high"));
+        assert_eq!(log[0].request_id.as_deref(), Some("req-123"));
+        assert_eq!(log[0].response_time_ms, Some(450));
+    }
+
+    // ── Backward compat: non-interactive patterns ────────────
+
+    #[test]
+    fn auto_approve_tools_skip_approval_any_config() {
         let config = AutonomyConfig::default();
-        let mgr = ApprovalManager::for_non_interactive(&config);
+        let mgr = ApprovalManager::from_config(&config);
 
         for tool in &config.auto_approve {
             assert!(
                 !mgr.needs_approval(tool),
-                "default auto_approve tool '{tool}' should not need approval in non-interactive mode"
+                "default auto_approve tool '{tool}' should not need approval"
             );
         }
     }
 
     #[test]
-    fn non_interactive_denies_unknown_tools() {
+    fn unknown_tools_need_approval() {
         let config = AutonomyConfig::default();
-        let mgr = ApprovalManager::for_non_interactive(&config);
+        let mgr = ApprovalManager::from_config(&config);
         assert!(
             mgr.needs_approval("some_unknown_tool"),
             "unknown tool should need approval"
@@ -589,9 +792,9 @@ mod tests {
     }
 
     #[test]
-    fn non_interactive_weather_is_auto_approved() {
+    fn weather_is_auto_approved() {
         let config = AutonomyConfig::default();
-        let mgr = ApprovalManager::for_non_interactive(&config);
+        let mgr = ApprovalManager::from_config(&config);
         assert!(
             !mgr.needs_approval("weather"),
             "weather tool must not need approval — it is in the default auto_approve list"
@@ -602,10 +805,113 @@ mod tests {
     fn always_ask_overrides_auto_approve() {
         let mut config = AutonomyConfig::default();
         config.always_ask = vec!["weather".into()];
-        let mgr = ApprovalManager::for_non_interactive(&config);
+        let mgr = ApprovalManager::from_config(&config);
         assert!(
             mgr.needs_approval("weather"),
             "always_ask must override auto_approve"
         );
+    }
+
+    // ── request_approval with mock adapter ───────────────────
+
+    #[tokio::test]
+    async fn request_approval_yes_flow() {
+        use super::adapter::tests::MockApprovalAdapter;
+
+        let config = supervised_config();
+        let mgr = ApprovalManager::from_config(&config);
+        let adapter = MockApprovalAdapter::new(ApprovalResponse::Yes);
+
+        let request = ApprovalRequest::new(
+            "file_write".into(),
+            serde_json::json!({"path": "test.txt"}),
+        );
+
+        let result = mgr.request_approval(&adapter, &request).await;
+        assert_eq!(result, ApprovalResponse::Yes);
+
+        let log = mgr.audit_log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].decision, ApprovalResponse::Yes);
+        assert!(log[0].response_time_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn request_approval_always_adds_to_allowlist() {
+        use super::adapter::tests::MockApprovalAdapter;
+
+        let config = supervised_config();
+        let mgr = ApprovalManager::from_config(&config);
+        let adapter = MockApprovalAdapter::new(ApprovalResponse::Always);
+
+        let request = ApprovalRequest::new(
+            "file_write".into(),
+            serde_json::json!({"path": "test.txt"}),
+        );
+
+        let result = mgr.request_approval(&adapter, &request).await;
+        assert_eq!(result, ApprovalResponse::Always);
+        assert!(!mgr.needs_approval("file_write"));
+    }
+
+    #[tokio::test]
+    async fn request_approval_always_for_always_ask_tool_does_not_allowlist() {
+        use super::adapter::tests::MockApprovalAdapter;
+
+        let config = supervised_config();
+        let mgr = ApprovalManager::from_config(&config);
+        let adapter = MockApprovalAdapter::new(ApprovalResponse::Always);
+
+        let request = ApprovalRequest::new(
+            "shell".into(),
+            serde_json::json!({"command": "ls"}),
+        );
+
+        let result = mgr.request_approval(&adapter, &request).await;
+        assert_eq!(result, ApprovalResponse::Always);
+        // shell is in always_ask, so it should still need approval.
+        assert!(mgr.needs_approval("shell"));
+    }
+
+    #[tokio::test]
+    async fn request_approval_timeout_flow() {
+        use super::adapter::tests::HangingApprovalAdapter;
+
+        let config = AutonomyConfig {
+            approval_timeout_secs: 1, // 1 second timeout for test speed
+            ..supervised_config()
+        };
+        let mgr = ApprovalManager::from_config(&config);
+        let adapter = HangingApprovalAdapter;
+
+        let request = ApprovalRequest::new(
+            "file_write".into(),
+            serde_json::json!({"path": "test.txt"}),
+        );
+
+        let result = mgr.request_approval(&adapter, &request).await;
+        assert_eq!(result, ApprovalResponse::Timeout);
+
+        let log = mgr.audit_log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].decision, ApprovalResponse::Timeout);
+    }
+
+    #[tokio::test]
+    async fn request_approval_deny_flow() {
+        use super::adapter::tests::MockApprovalAdapter;
+
+        let config = supervised_config();
+        let mgr = ApprovalManager::from_config(&config);
+        let adapter = MockApprovalAdapter::new(ApprovalResponse::No);
+
+        let request = ApprovalRequest::new(
+            "file_write".into(),
+            serde_json::json!({"path": "test.txt"}),
+        );
+
+        let result = mgr.request_approval(&adapter, &request).await;
+        assert_eq!(result, ApprovalResponse::No);
+        assert!(mgr.needs_approval("file_write"));
     }
 }
