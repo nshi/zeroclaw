@@ -3132,10 +3132,10 @@ pub(crate) async fn run_tool_call_loop(
             // ── Approval hook ────────────────────────────────
             if let Some(mgr) = approval {
                 if mgr.needs_approval(&tool_name) {
-                    let request = ApprovalRequest {
-                        tool_name: tool_name.clone(),
-                        arguments: tool_args.clone(),
-                    };
+                    let request = ApprovalRequest::new(
+                        tool_name.clone(),
+                        tool_args.clone(),
+                    );
 
                     // Interactive CLI: prompt the operator.
                     // Non-interactive (channels): auto-deny since no operator
