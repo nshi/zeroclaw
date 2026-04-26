@@ -628,32 +628,53 @@ def _display_system_prompt(session: Session) -> None:
     print(c("── End System Prompt ──", "cyan", "bold"))
 
 
-def _find_provider_api_request(session: Session) -> dict | None:
-    """Return the first provider_api_request event payload in the session."""
-    for ev in session.events:
-        if ev.get("event_type") == "provider_api_request":
-            return ev.get("payload")
-    return None
+def _find_provider_api_request(session: Session, near_idx: int | None = None) -> tuple[dict | None, dict | None]:
+    """Return the provider_api_request event nearest to *near_idx*.
+
+    Searches backward from *near_idx* first (the request that produced the
+    current turn), then forward.  Returns ``(payload, event)`` or
+    ``(None, None)`` when no match exists.
+    """
+    events = session.events
+    if near_idx is not None:
+        # Search backward from near_idx (inclusive)
+        for i in range(near_idx, -1, -1):
+            if events[i].get("event_type") == "provider_api_request":
+                return events[i].get("payload"), events[i]
+        # Then forward
+        for i in range(near_idx + 1, len(events)):
+            if events[i].get("event_type") == "provider_api_request":
+                return events[i].get("payload"), events[i]
+    else:
+        for ev in events:
+            if ev.get("event_type") == "provider_api_request":
+                return ev.get("payload"), ev
+    return None, None
 
 
-def _display_provider_api_request(session: Session) -> None:
-    payload = _find_provider_api_request(session)
+def _display_provider_api_request(session: Session, near_idx: int | None = None) -> None:
+    payload, event = _find_provider_api_request(session, near_idx)
     if payload is None:
         print(c("  (no provider API request in this session)", "dim"))
         return
+    iteration = payload.get("iteration") or (event or {}).get("payload", {}).get("iteration")
+    iter_label = f" (iteration {iteration})" if iteration else ""
     print()
-    print(c("── Provider API Request (full payload) ──", "cyan", "bold"))
+    print(c(f"── Provider API Request{iter_label} (full payload) ──", "cyan", "bold"))
     # Show the full JSON, but truncate message content for readability
     display = dict(payload)
-    messages = display.get("messages") or []
+    messages = display.get("messages") or display.get("contents") or []
     summarized = []
     for msg in messages:
         m = dict(msg)
         content = m.get("content", "")
-        if len(content) > 500:
+        if isinstance(content, str) and len(content) > 500:
             m["content"] = content[:500] + f"... ({len(content)} chars total)"
         summarized.append(m)
-    display["messages"] = summarized
+    if "messages" in display:
+        display["messages"] = summarized
+    elif "contents" in display:
+        display["contents"] = summarized
     print(json.dumps(display, indent=2, default=str))
     print(c("── End Provider API Request ──", "cyan", "bold"))
 
@@ -666,7 +687,7 @@ def stepper(session: Session, dump: bool = False) -> None:
         return
 
     has_system_prompt = _find_system_prompt(session) is not None
-    has_provider_request = _find_provider_api_request(session) is not None
+    has_provider_request = _find_provider_api_request(session)[0] is not None
 
     if dump:
         for i, ev in enumerate(events, 1):
@@ -714,7 +735,7 @@ def stepper(session: Session, dump: bool = False) -> None:
         elif raw == "s" and has_system_prompt:
             _display_system_prompt(session)
         elif raw == "t" and has_provider_request:
-            _display_provider_api_request(session)
+            _display_provider_api_request(session, near_idx=idx)
         else:
             try:
                 jump = int(raw)
