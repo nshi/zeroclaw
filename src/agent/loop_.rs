@@ -3134,8 +3134,8 @@ pub(crate) async fn run_tool_call_loop(
             // ── Approval hook ────────────────────────────────
             if let Some(mgr) = approval {
                 if mgr.needs_approval(&tool_name) {
-                    let mut request = ApprovalRequest::new(tool_name.clone(), tool_args.clone());
-                    request.channel = channel_name.to_string();
+                    let request =
+                        ApprovalRequest::new(tool_name.clone(), tool_args.clone(), channel_name);
 
                     // Route through adapter when available; otherwise fall
                     // back to the legacy is_non_interactive/prompt_cli path.
