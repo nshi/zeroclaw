@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["pygments"]
+# ///
 """Mentat runtime trace log viewer.
 
 Searches, browses, and steps through JSONL runtime trace events grouped
@@ -8,7 +12,18 @@ by turn_id into sessions.  Designed for fast tail-reading of large files.
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
+
+# Optional syntax highlighting via pygments
+try:
+    from pygments import highlight as _pygments_highlight
+    from pygments.lexers import JsonLexer as _JsonLexer, MarkdownLexer as _MarkdownLexer
+    from pygments.formatters import Terminal256Formatter as _Terminal256Formatter
+    _HAS_PYGMENTS = True
+except ImportError:
+    _HAS_PYGMENTS = False
 
 # ---------------------------------------------------------------------------
 # Color helpers
@@ -38,6 +53,55 @@ def c(text: str, *styles: str) -> str:
         return text
     prefix = "".join(COLORS.get(s, "") for s in styles)
     return f"{prefix}{text}{COLORS['reset']}" if prefix else text
+
+
+# ---------------------------------------------------------------------------
+# Pager helper
+# ---------------------------------------------------------------------------
+
+_PAGER_THRESHOLD = 40  # lines before auto-paging
+
+
+def _paged_output(text: str) -> None:
+    """Print *text* through a pager if it exceeds the threshold, else print directly."""
+    lines = text.split("\n")
+    term_height = shutil.get_terminal_size((80, 24)).lines
+    if len(lines) <= max(_PAGER_THRESHOLD, term_height - 4):
+        print(text)
+        return
+    pager = os.environ.get("PAGER", "less")
+    try:
+        proc = subprocess.Popen(
+            [pager, "-R"],  # -R for ANSI color passthrough
+            stdin=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+        )
+        proc.communicate(input=text)
+    except (FileNotFoundError, OSError):
+        print(text)
+
+
+# ---------------------------------------------------------------------------
+# Syntax highlighting helpers
+# ---------------------------------------------------------------------------
+
+def _formatter():
+    return _Terminal256Formatter(style="monokai")
+
+
+def highlight_json(text: str) -> str:
+    """Syntax-highlight a JSON string if pygments is available."""
+    if not _use_color or not _HAS_PYGMENTS:
+        return text
+    return _pygments_highlight(text, _JsonLexer(), _formatter()).rstrip()
+
+
+def highlight_markdown(text: str) -> str:
+    """Syntax-highlight a Markdown string if pygments is available."""
+    if not _use_color or not _HAS_PYGMENTS:
+        return text
+    return _pygments_highlight(text, _MarkdownLexer(), _formatter()).rstrip()
 
 
 # ---------------------------------------------------------------------------
@@ -339,9 +403,17 @@ def _render_llm_request(payload: dict, event: dict | None = None) -> list[str]:
     role = last_msg.get("role", "?")
     content = str(last_msg.get("content", ""))
     label = "System Prompt" if role == "system" else f"Last Message ({role})"
-    lines.append(f"  {c(f'{label}:', 'bold')}")
-    for line in content.split("\n"):
+    n_lines = content.count("\n") + 1
+    n_chars = len(content)
+    lines.append(f"  {c(f'{label}:', 'bold')} {c(f'({n_lines} lines, {n_chars:,} chars)', 'dim')}")
+    # Show first few non-empty lines as preview
+    preview_lines = [l for l in content.split("\n") if l.strip()][:5]
+    for line in preview_lines:
+        if len(line) > 120:
+            line = line[:117] + "..."
         lines.append(f"    {c(line, 'dim')}")
+    if n_lines > 5:
+        lines.append(f"    {c(f'... ({n_lines - 5} more lines, use [s] to browse)', 'dim')}")
     return lines
 
 
@@ -374,8 +446,9 @@ def _render_tool_call_start(payload: dict) -> list[str]:
             pretty = json.dumps(args, indent=2)
         except (TypeError, ValueError):
             pretty = str(args)
-        for line in pretty.split("\n"):
-            lines.append(f"  {c(line, 'dim')}")
+        highlighted = highlight_json(pretty)
+        for line in highlighted.split("\n"):
+            lines.append(f"  {line}")
     return lines
 
 
@@ -543,10 +616,12 @@ def _render_generic(payload: dict) -> list[str]:
     lines = [f"  {c('Payload keys:', 'bold')} {', '.join(str(k) for k in payload.keys())}"]
     try:
         pretty = json.dumps(payload, indent=2, default=str)
-        for line in pretty.split("\n")[:20]:
-            lines.append(f"  {c(line, 'dim')}")
-        if pretty.count("\n") > 20:
-            lines.append(f"  {c('... (truncated)', 'dim')}")
+        highlighted = highlight_json(pretty)
+        all_lines = highlighted.split("\n")
+        for line in all_lines[:20]:
+            lines.append(f"  {line}")
+        if len(all_lines) > 20:
+            lines.append(f"  {c(f'... ({len(all_lines) - 20} more lines, use [r] for full)', 'dim')}")
     except (TypeError, ValueError):
         lines.append(f"  {str(payload)[:300]}")
     return lines
@@ -616,16 +691,79 @@ def _find_system_prompt(session: Session) -> str | None:
     return None
 
 
+def _extract_sections(text: str) -> list[tuple[str, str]]:
+    """Split markdown text into (heading, body) sections.
+
+    Lines starting with ``#`` begin a new section.  Content before the first
+    heading is placed in a "(preamble)" section.
+    """
+    sections: list[tuple[str, str]] = []
+    current_heading = "(preamble)"
+    current_lines: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            if current_lines or current_heading != "(preamble)":
+                sections.append((current_heading, "\n".join(current_lines)))
+            current_heading = stripped.rstrip()
+            current_lines = []
+        else:
+            current_lines.append(line)
+    sections.append((current_heading, "\n".join(current_lines)))
+    # Drop empty preamble
+    if sections and sections[0][0] == "(preamble)" and not sections[0][1].strip():
+        sections = sections[1:]
+    return sections
+
+
 def _display_system_prompt(session: Session) -> None:
     text = _find_system_prompt(session)
     if text is None:
         print(c("  (no system prompt found in this session)", "dim"))
         return
+
+    total_lines = text.count("\n") + 1
+    total_chars = len(text)
+    sections = _extract_sections(text)
+
     print()
-    print(c("── System Prompt ──", "cyan", "bold"))
-    for line in text.split("\n"):
-        print(f"  {c(line, 'dim')}")
-    print(c("── End System Prompt ──", "cyan", "bold"))
+    print(c(f"── System Prompt ({total_lines} lines, {total_chars:,} chars) ──", "cyan", "bold"))
+    print()
+
+    if len(sections) <= 1:
+        # No meaningful section structure — just page the whole thing
+        buf = "\n".join(f"  {c(line, 'dim')}" for line in text.split("\n"))
+        _paged_output(buf)
+        return
+
+    # Show table of contents
+    for i, (heading, body) in enumerate(sections, 1):
+        n = body.count("\n") + 1 if body.strip() else 0
+        print(f"  {c(f'[{i}]', 'bold')} {heading}  {c(f'({n} lines)', 'dim')}")
+
+    print()
+    print(c("  [#]=view section  [a]=view all  [q]=back", "dim"))
+
+    while True:
+        try:
+            raw = input(c("  system> ", "dim")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if raw in ("q", "quit", ""):
+            break
+        if raw == "a":
+            _paged_output(highlight_markdown(text))
+            continue
+        try:
+            idx = int(raw)
+            if 1 <= idx <= len(sections):
+                heading, body = sections[idx - 1]
+                section_text = heading + "\n" + body
+                _paged_output(highlight_markdown(section_text))
+            else:
+                print(c(f"  Enter 1-{len(sections)}", "red"))
+        except ValueError:
+            pass
 
 
 def _find_provider_api_request(session: Session, near_idx: int | None = None) -> tuple[dict | None, dict | None]:
@@ -652,31 +790,168 @@ def _find_provider_api_request(session: Session, near_idx: int | None = None) ->
     return None, None
 
 
+def _msg_content_length(msg: dict) -> int:
+    """Return approximate char length of a message's content."""
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        total = 0
+        for part in content:
+            if isinstance(part, dict):
+                total += len(part.get("text", ""))
+            else:
+                total += len(str(part))
+        return total
+    return len(str(content))
+
+
+def _msg_content_text(msg: dict) -> str:
+    """Extract the text content of a message for display."""
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and "text" in part:
+                parts.append(part["text"])
+            elif isinstance(part, dict):
+                parts.append(f"[{part.get('type', 'block')}]")
+            else:
+                parts.append(str(part))
+        return "\n".join(parts)
+    return str(content)
+
+
 def _display_provider_api_request(session: Session, near_idx: int | None = None) -> None:
     payload, event = _find_provider_api_request(session, near_idx)
     if payload is None:
         print(c("  (no provider API request in this session)", "dim"))
         return
+
+    provider = (event or {}).get("provider", "?")
+    model = payload.get("model", "?")
     iteration = payload.get("iteration") or (event or {}).get("payload", {}).get("iteration")
-    iter_label = f" (iteration {iteration})" if iteration else ""
+    iter_label = f" iter {iteration}" if iteration else ""
+    messages = payload.get("messages") or payload.get("contents") or []
+    msg_key = "contents" if "contents" in payload and "messages" not in payload else "messages"
+    tools = payload.get("tools") or []
+    # System prompt: top-level key (Anthropic) or first message with role "system" (OpenAI-compat)
+    system = payload.get("system") or payload.get("system_instruction") or payload.get("systemInstruction")
+    system_in_messages = False
+    if not system and messages and messages[0].get("role") == "system":
+        system = messages[0].get("content", "")
+        system_in_messages = True
+
+    # Compute sizes
+    total_json = json.dumps(payload, default=str)
+    total_chars = len(total_json)
+
     print()
-    print(c(f"── Provider API Request{iter_label} (full payload) ──", "cyan", "bold"))
-    # Show the full JSON, but truncate message content for readability
-    display = dict(payload)
-    messages = display.get("messages") or display.get("contents") or []
-    summarized = []
-    for msg in messages:
-        m = dict(msg)
-        content = m.get("content", "")
-        if isinstance(content, str) and len(content) > 500:
-            m["content"] = content[:500] + f"... ({len(content)} chars total)"
-        summarized.append(m)
-    if "messages" in display:
-        display["messages"] = summarized
-    elif "contents" in display:
-        display["contents"] = summarized
-    print(json.dumps(display, indent=2, default=str))
-    print(c("── End Provider API Request ──", "cyan", "bold"))
+    print(c(f"── Provider API Request ({provider}, {model},{iter_label} {total_chars:,} chars) ──", "cyan", "bold"))
+    print()
+
+    # Overview
+    print(f"  {c('Provider:', 'bold')} {provider}  {c('Model:', 'bold')} {model}")
+    if system:
+        if isinstance(system, str):
+            sys_chars = len(system)
+        else:
+            sys_chars = len(json.dumps(system, default=str))
+        where = "in messages[0]" if system_in_messages else "top-level"
+        print(f"  {c('System:', 'bold')} {c(f'present ({sys_chars:,} chars, {where})', 'dim')}")
+    print(f"  {c(f'{msg_key.title()}:', 'bold')} {len(messages)}")
+    for i, msg in enumerate(messages):
+        role = msg.get("role", "?")
+        chars = _msg_content_length(msg)
+        suffix = ""
+        if system_in_messages and i == 0:
+            suffix += c(" [system prompt, use 's']", "cyan")
+        if msg.get("tool_calls"):
+            suffix += c(" [+tool_calls]", "yellow")
+        print(f"    {c(f'[{i+1}]', 'dim')} {c(role, 'bold')} ({chars:,} chars){suffix}")
+    if tools:
+        names = []
+        for t in tools:
+            func = t.get("function", {})
+            name = func.get("name") if isinstance(func, dict) else None
+            names.append(name or t.get("name", "?"))
+        print(f"  {c(f'Tools ({len(names)}):', 'bold')} {c(', '.join(names[:10]), 'dim')}")
+        if len(names) > 10:
+            print(f"    {c(f'... and {len(names) - 10} more', 'dim')}")
+    else:
+        print(f"  {c('Tools:', 'bold')} {c('none', 'dim')}")
+
+    # Non-message/tool/system keys
+    skip = {"model", "messages", "contents", "tools", "system", "system_instruction",
+            "systemInstruction", "iteration", "stream"}
+    extra = {k: v for k, v in payload.items() if k not in skip and v is not None}
+    if extra:
+        for k, v in extra.items():
+            val_str = str(v)
+            if len(val_str) > 80:
+                val_str = val_str[:77] + "..."
+            print(f"  {c(f'{k}:', 'bold')} {c(val_str, 'dim')}")
+
+    print()
+    parts = ["[m#]=message", "[s]=system", "[t]=tools", "[a]=all JSON", "[q]=back"]
+    print(c(f"  {' '.join(parts)}", "dim"))
+
+    while True:
+        try:
+            raw = input(c("  provider> ", "dim")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if raw in ("q", "quit", ""):
+            break
+        if raw == "a":
+            full_json = json.dumps(payload, indent=2, default=str)
+            _paged_output(highlight_json(full_json))
+            continue
+        if raw == "s":
+            if not system:
+                print(c("  (no system prompt in this payload)", "dim"))
+            else:
+                if isinstance(system, str):
+                    highlighted = highlight_markdown(system)
+                elif isinstance(system, list):
+                    # Content blocks (Anthropic) — extract text parts
+                    text_parts = []
+                    for block in system:
+                        if isinstance(block, dict) and "text" in block:
+                            text_parts.append(block["text"])
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                        else:
+                            text_parts.append(json.dumps(block, indent=2, default=str))
+                    highlighted = highlight_markdown("\n".join(text_parts))
+                else:
+                    highlighted = highlight_json(json.dumps(system, indent=2, default=str))
+                _paged_output(c("── System ──\n", "cyan", "bold") + highlighted)
+            continue
+        if raw == "t":
+            if not tools:
+                print(c("  (no tools)", "dim"))
+            else:
+                _paged_output(highlight_json(json.dumps(tools, indent=2, default=str)))
+            continue
+        # m<N> — view a specific message
+        if raw.startswith("m"):
+            num_str = raw[1:]
+            try:
+                idx = int(num_str)
+                if 1 <= idx <= len(messages):
+                    msg = messages[idx - 1]
+                    text = _msg_content_text(msg)
+                    role = msg.get("role", "?")
+                    header = c(f"── Message {idx} ({role}, {len(text):,} chars) ──", "cyan", "bold")
+                    _paged_output(header + "\n" + highlight_markdown(text))
+                else:
+                    print(c(f"  Enter m1-m{len(messages)}", "red"))
+            except ValueError:
+                print(c("  Use m1, m2, etc. to view a message", "dim"))
+            continue
 
 
 def stepper(session: Session, dump: bool = False) -> None:
@@ -728,10 +1003,10 @@ def stepper(session: Session, dump: bool = False) -> None:
             if idx > 0:
                 idx -= 1
         elif raw == "r":
-            print()
-            print(c("── Raw JSON ──", "cyan", "bold"))
-            print(json.dumps(events[idx], indent=2, default=str))
-            print(c("── End Raw JSON ──", "cyan", "bold"))
+            raw_json = json.dumps(events[idx], indent=2, default=str)
+            header = c("── Raw JSON ──", "cyan", "bold")
+            footer = c("── End Raw JSON ──", "cyan", "bold")
+            _paged_output(header + "\n" + highlight_json(raw_json) + "\n" + footer)
         elif raw == "s" and has_system_prompt:
             _display_system_prompt(session)
         elif raw == "t" and has_provider_request:
@@ -841,6 +1116,9 @@ def main() -> None:
     args = parser.parse_args()
 
     _init_color(args.no_color)
+
+    if _use_color and not _HAS_PYGMENTS:
+        print(c("hint: install pygments for syntax highlighting: pip install pygments", "dim"))
 
     if not validate_file(args.file):
         sys.exit(1)
