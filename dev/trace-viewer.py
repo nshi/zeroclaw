@@ -62,6 +62,11 @@ def c(text: str, *styles: str) -> str:
 _PAGER_THRESHOLD = 40  # lines before auto-paging
 
 
+def short_id(s: str, n: int = 8) -> str:
+    """Truncate a UUID or ID string for display."""
+    return s[:n] if len(s) > n else s
+
+
 def _paged_output(text: str) -> None:
     """Print *text* through a pager if it exceeds the threshold, else print directly."""
     lines = text.split("\n")
@@ -156,17 +161,19 @@ def forward_line_reader(path: str):
 
 
 # ---------------------------------------------------------------------------
-# Session grouping
+# Turn & session grouping
 # ---------------------------------------------------------------------------
 
-class Session:
+class Turn:
+    """A single agent turn: all events sharing the same ``turn_id``."""
     __slots__ = (
-        "turn_id", "events", "start_time", "end_time",
+        "turn_id", "session_id", "events", "start_time", "end_time",
         "channel", "model", "user_prompt",
     )
 
     def __init__(self, turn_id: str):
         self.turn_id = turn_id
+        self.session_id: str | None = None
         self.events: list[dict] = []
         self.start_time: str = ""
         self.end_time: str = ""
@@ -184,33 +191,74 @@ class Session:
                 self.channel = ev["channel"]
             if not self.model and ev.get("model"):
                 self.model = ev["model"]
+            if not self.session_id and ev.get("session_id"):
+                self.session_id = ev["session_id"]
             if not self.user_prompt and ev.get("event_type") == "channel_message_inbound":
                 payload = ev.get("payload") or {}
                 self.user_prompt = payload.get("content_preview", "")
 
 
-def group_events_into_sessions(events: list[dict]) -> list[Session]:
-    """Group events by turn_id, associating orphan inbound/outbound events
-    with the nearest session.
+class ConversationSession:
+    """A conversation session: multiple turns sharing the same ``session_id``."""
+    __slots__ = (
+        "session_id", "turns", "start_time", "end_time",
+        "channel", "model", "user_prompts",
+    )
 
-    In the real trace format, ``channel_message_inbound`` and
-    ``channel_message_outbound`` carry no ``turn_id``.  An inbound event is
-    the *trigger* for the next turn_id that appears, and an outbound event is
-    the *delivery* of the preceding turn_id's response.  We attach them
-    accordingly via a two-pass positional association.
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self.turns: list[Turn] = []
+        self.start_time: str = ""
+        self.end_time: str = ""
+        self.channel: str = ""
+        self.model: str = ""
+        self.user_prompts: list[str] = []
+
+    @property
+    def turn_count(self) -> int:
+        return len(self.turns)
+
+    @property
+    def event_count(self) -> int:
+        return sum(len(t.events) for t in self.turns)
+
+    def finalize(self) -> None:
+        self.turns.sort(key=lambda t: t.start_time)
+        if self.turns:
+            self.start_time = self.turns[0].start_time
+            self.end_time = self.turns[-1].end_time
+        self.channel = ""
+        self.model = ""
+        self.user_prompts = []
+        for t in self.turns:
+            if not self.channel and t.channel:
+                self.channel = t.channel
+            if not self.model and t.model:
+                self.model = t.model
+            if t.user_prompt:
+                self.user_prompts.append(t.user_prompt)
+
+
+def group_events_into_turns(events: list[dict]) -> list[Turn]:
+    """Group events by turn_id, associating orphan inbound/outbound events
+    with the nearest turn.
+
+    ``channel_message_inbound`` and ``channel_message_outbound`` carry no
+    ``turn_id``.  An inbound event is the *trigger* for the next turn_id
+    that appears, and an outbound event is the *delivery* of the preceding
+    turn_id's response.  We attach them accordingly via positional
+    association.
     """
-    buckets: dict[str, Session] = {}
+    buckets: dict[str, Turn] = {}
     orphans_before: list[tuple[int, dict]] = []  # (index, event)
     last_tid: str | None = None
 
-    # Pass 1: bucket events with a turn_id; track orphans.
     for i, ev in enumerate(events):
         tid = ev.get("turn_id")
         if tid:
             if tid not in buckets:
-                buckets[tid] = Session(tid)
+                buckets[tid] = Turn(tid)
             buckets[tid].events.append(ev)
-            # Flush any preceding orphans into this session (inbound triggers)
             for _, orphan in orphans_before:
                 buckets[tid].events.append(orphan)
             orphans_before.clear()
@@ -218,21 +266,48 @@ def group_events_into_sessions(events: list[dict]) -> list[Session]:
         else:
             etype = ev.get("event_type", "")
             if etype == "channel_message_outbound" and last_tid and last_tid in buckets:
-                # Outbound belongs to the session that just finished
                 buckets[last_tid].events.append(ev)
             elif etype == "channel_message_inbound":
-                # Inbound triggers the *next* session — hold until we see it
                 orphans_before.append((i, ev))
             else:
                 orphans_before.append((i, ev))
 
-    # Any remaining orphans that never got a following turn_id
-    standalone: list[Session] = []
+    standalone: list[Turn] = []
     for _, ev in orphans_before:
-        s = Session("(no turn_id)")
-        s.events.append(ev)
-        s.finalize()
-        standalone.append(s)
+        t = Turn("(no turn_id)")
+        t.events.append(ev)
+        t.finalize()
+        standalone.append(t)
+
+    turns = list(buckets.values())
+    for t in turns:
+        t.finalize()
+    turns.extend(standalone)
+    turns.sort(key=lambda t: t.start_time, reverse=True)
+    return turns
+
+
+def group_turns_into_sessions(turns: list[Turn]) -> list[ConversationSession]:
+    """Group turns by ``session_id`` into conversation sessions.
+
+    Turns without a ``session_id`` (e.g. from older trace files) are each
+    placed in their own standalone session so the viewer still works.
+    """
+    buckets: dict[str, ConversationSession] = {}
+    standalone: list[ConversationSession] = []
+
+    for t in turns:
+        sid = t.session_id
+        if sid:
+            if sid not in buckets:
+                buckets[sid] = ConversationSession(sid)
+            buckets[sid].turns.append(t)
+        else:
+            # No session_id — wrap the turn in its own session
+            s = ConversationSession(t.turn_id)
+            s.turns.append(t)
+            s.finalize()
+            standalone.append(s)
 
     sessions = list(buckets.values())
     for s in sessions:
@@ -246,7 +321,7 @@ def group_events_into_sessions(events: list[dict]) -> list[Session]:
 # Search
 # ---------------------------------------------------------------------------
 
-def search_sessions(path: str, term: str) -> list[Session]:
+def search_sessions(path: str, term: str) -> list[ConversationSession]:
     """Find sessions whose inbound prompt matches *term*.
 
     Because ``channel_message_inbound`` carries no ``turn_id`` in the real
@@ -265,7 +340,6 @@ def search_sessions(path: str, term: str) -> list[Session]:
             payload = evt.get("payload") or {}
             preview = payload.get("content_preview", "")
             pending_match = term_lower in preview.lower()
-            # Also handle the case where inbound *does* carry a turn_id
             if pending_match and tid:
                 matching_turn_ids.add(tid)
                 pending_match = False
@@ -276,8 +350,7 @@ def search_sessions(path: str, term: str) -> list[Session]:
     if not matching_turn_ids:
         return []
 
-    # Pass 2: collect all events that belong to matched sessions
-    # (including surrounding orphan inbound/outbound via group_events)
+    # Pass 2: collect all events that belong to matched turns
     matching_events: list[dict] = []
     pending_orphans: list[dict] = []
     last_matched = False
@@ -297,34 +370,43 @@ def search_sessions(path: str, term: str) -> list[Session]:
             else:
                 pending_orphans.append(evt)
 
-    return group_events_into_sessions(matching_events)
+    turns = group_events_into_turns(matching_events)
+    return group_turns_into_sessions(turns)
 
 
 # ---------------------------------------------------------------------------
 # Recent sessions via reverse reader
 # ---------------------------------------------------------------------------
 
-def recent_sessions(path: str, count: int) -> list[Session]:
+def recent_sessions(path: str, count: int) -> list[ConversationSession]:
+    """Return the *count* most recent conversation sessions.
+
+    Reads backward to find enough distinct session_ids (or turn_ids for
+    legacy traces without session_id).
+    """
     events: list[dict] = []
+    seen_session_ids: set[str] = set()
     seen_turn_ids: set[str] = set()
 
     for line in reverse_line_reader(path):
         evt = parse_line(line)
         if evt is None:
             continue
+        sid = evt.get("session_id")
         tid = evt.get("turn_id")
-        if tid and tid not in seen_turn_ids:
+        if sid and sid not in seen_session_ids:
+            seen_session_ids.add(sid)
+        elif not sid and tid and tid not in seen_turn_ids:
             seen_turn_ids.add(tid)
         events.append(evt)
-        # Once we've seen enough distinct turn_ids, keep reading until we
-        # finish the oldest session boundary (its first event).  A simple
-        # heuristic: after collecting count turn_ids, stop when we hit
-        # another new one (meaning we've passed the boundary).
-        if len(seen_turn_ids) > count:
+        # Stop once we have enough distinct sessions (or turn_ids for
+        # legacy events).  Over-read slightly to capture boundary events.
+        if len(seen_session_ids) + len(seen_turn_ids) > count:
             break
 
     events.reverse()
-    sessions = group_events_into_sessions(events)
+    turns = group_events_into_turns(events)
+    sessions = group_turns_into_sessions(turns)
     return sessions[:count]
 
 
@@ -332,7 +414,7 @@ def recent_sessions(path: str, count: int) -> list[Session]:
 # Session list display
 # ---------------------------------------------------------------------------
 
-def display_session_list(sessions: list[Session], search_term: str | None = None) -> None:
+def display_session_list(sessions: list[ConversationSession], search_term: str | None = None) -> None:
     if not sessions:
         if search_term:
             print(f'No sessions matching "{search_term}".')
@@ -351,11 +433,34 @@ def display_session_list(sessions: list[Session], search_term: str | None = None
         ts = s.start_time or "unknown"
         ch = s.channel or "?"
         mdl = s.model or "?"
-        n_events = len(s.events)
         idx = c(f"[{i}]", "bold")
-        meta = c(f"{ts} | {ch} | {mdl} | {n_events} events", "dim")
+        sid_short = short_id(s.session_id)
+        meta = c(f"{ts} | {ch} | {mdl} | {s.turn_count} turns, {s.event_count} events | sid={sid_short}", "dim")
         print(f"{idx} {meta}")
-        prompt = s.user_prompt or "(no user prompt)"
+        # Show first user prompt as preview
+        prompt = s.user_prompts[0] if s.user_prompts else "(no user prompt)"
+        if len(prompt) > 100:
+            prompt = prompt[:97] + "..."
+        print(f"    {c(prompt, 'green')}")
+        if len(s.user_prompts) > 1:
+            print(f"    {c(f'... and {len(s.user_prompts) - 1} more turn(s)', 'dim')}")
+
+
+def display_turn_list(session: ConversationSession) -> None:
+    """Display the turns within a session."""
+    print()
+    sid_short = short_id(session.session_id)
+    print(c(f"Session {sid_short} — {session.turn_count} turns", "cyan", "bold"))
+    print()
+    for i, t in enumerate(session.turns, 1):
+        ts = t.start_time or "unknown"
+        mdl = t.model or "?"
+        n_events = len(t.events)
+        idx = c(f"[{i}]", "bold")
+        tid_short = short_id(t.turn_id)
+        meta = c(f"{ts} | {mdl} | {n_events} events | tid={tid_short}", "dim")
+        print(f"{idx} {meta}")
+        prompt = t.user_prompt or "(no user prompt)"
         if len(prompt) > 100:
             prompt = prompt[:97] + "..."
         print(f"    {c(prompt, 'green')}")
@@ -677,7 +782,7 @@ def format_turn(index: int, total: int, event: dict) -> str:
 # Interactive stepper
 # ---------------------------------------------------------------------------
 
-def _find_system_prompt(session: Session) -> str | None:
+def _find_system_prompt(session: Turn) -> str | None:
     """Return the system prompt from the first llm_request in the session, if any."""
     for ev in session.events:
         if ev.get("event_type") != "llm_request":
@@ -716,7 +821,7 @@ def _extract_sections(text: str) -> list[tuple[str, str]]:
     return sections
 
 
-def _display_system_prompt(session: Session) -> None:
+def _display_system_prompt(session: Turn) -> None:
     text = _find_system_prompt(session)
     if text is None:
         print(c("  (no system prompt found in this session)", "dim"))
@@ -766,7 +871,7 @@ def _display_system_prompt(session: Session) -> None:
             pass
 
 
-def _find_provider_api_request(session: Session, near_idx: int | None = None) -> tuple[dict | None, dict | None]:
+def _find_provider_api_request(session: Turn, near_idx: int | None = None) -> tuple[dict | None, dict | None]:
     """Return the provider_api_request event nearest to *near_idx*.
 
     Searches backward from *near_idx* first (the request that produced the
@@ -824,7 +929,7 @@ def _msg_content_text(msg: dict) -> str:
     return str(content)
 
 
-def _display_provider_api_request(session: Session, near_idx: int | None = None) -> None:
+def _display_provider_api_request(session: Turn, near_idx: int | None = None) -> None:
     payload, event = _find_provider_api_request(session, near_idx)
     if payload is None:
         print(c("  (no provider API request in this session)", "dim"))
@@ -954,7 +1059,7 @@ def _display_provider_api_request(session: Session, near_idx: int | None = None)
             continue
 
 
-def stepper(session: Session, dump: bool = False) -> None:
+def stepper(session: Turn, dump: bool = False) -> None:
     events = session.events
     total = len(events)
     if total == 0:
@@ -1026,7 +1131,42 @@ def stepper(session: Session, dump: bool = False) -> None:
 # Session selection prompt
 # ---------------------------------------------------------------------------
 
-def session_select_loop(sessions: list[Session], dump: bool = False) -> None:
+def turn_select_loop(session: ConversationSession, dump: bool = False) -> None:
+    """Drill into a session's turns."""
+    if session.turn_count == 1:
+        # Single-turn session — go straight to event stepper
+        stepper(session.turns[0], dump=dump)
+        return
+
+    while True:
+        display_turn_list(session)
+        if not session.turns:
+            return
+        print()
+        try:
+            raw = input(c("Select turn [1-{}, a=all, q=back]: ".format(session.turn_count), "dim")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+
+        if raw in ("q", "quit", ""):
+            return
+        if raw == "a":
+            # Dump all turns in sequence
+            for t in session.turns:
+                print(c(f"\n=== Turn: {short_id(t.turn_id)} ===", "cyan", "bold"))
+                stepper(t, dump=True)
+            continue
+        try:
+            choice = int(raw)
+        except ValueError:
+            continue
+        if 1 <= choice <= session.turn_count:
+            stepper(session.turns[choice - 1], dump=dump)
+        else:
+            print(c(f"  Enter a number 1-{session.turn_count}", "red"))
+
+
+def session_select_loop(sessions: list[ConversationSession], dump: bool = False) -> None:
     while True:
         print()
         display_session_list(sessions)
@@ -1045,7 +1185,7 @@ def session_select_loop(sessions: list[Session], dump: bool = False) -> None:
         except ValueError:
             continue
         if 1 <= choice <= len(sessions):
-            stepper(sessions[choice - 1], dump=dump)
+            turn_select_loop(sessions[choice - 1], dump=dump)
         else:
             print(c(f"  Enter a number 1-{len(sessions)}", "red"))
 
@@ -1132,14 +1272,20 @@ def main() -> None:
     else:
         sessions = recent_sessions(args.file, args.last)
 
-    # Apply --event-type filter: keep only matching events within each session,
-    # and drop sessions that become empty.
+    # Apply --event-type filter: keep only matching events within each turn,
+    # then drop empty turns and sessions.
     if args.event_type:
         et = args.event_type.lower()
         filtered = []
         for s in sessions:
-            s.events = [e for e in s.events if (e.get("event_type", "").lower() == et)]
-            if s.events:
+            kept_turns = []
+            for t in s.turns:
+                t.events = [e for e in t.events if (e.get("event_type", "").lower() == et)]
+                if t.events:
+                    t.finalize()
+                    kept_turns.append(t)
+            if kept_turns:
+                s.turns = kept_turns
                 s.finalize()
                 filtered.append(s)
         sessions = filtered
@@ -1148,8 +1294,12 @@ def main() -> None:
         display_session_list(sessions, search_term=args.search_term)
         print()
         for s in sessions:
-            print(c(f"=== Session: {s.turn_id} ===", "cyan", "bold"))
-            stepper(s, dump=True)
+            sid_short = short_id(s.session_id)
+            print(c(f"=== Session: {sid_short} ===", "cyan", "bold"))
+            for t in s.turns:
+                tid_short = short_id(t.turn_id)
+                print(c(f"--- Turn: {tid_short} ---", "cyan"))
+                stepper(t, dump=True)
     else:
         session_select_loop(sessions, dump=args.dump)
 
