@@ -332,7 +332,7 @@ pub async fn handle_api_cron_add(
             }
         };
 
-        crate::cron::add_shell_job_with_approval(&config, name, schedule, command, delivery, false)
+        crate::cron::add_shell_job_with_approval(&config, name, schedule, command, delivery)
     };
 
     match result {
@@ -444,7 +444,7 @@ pub async fn handle_api_cron_patch(
         ..crate::cron::CronJobPatch::default()
     };
 
-    match crate::cron::update_shell_job_with_approval(&config, &id, patch, false) {
+    match crate::cron::update_shell_job_with_approval(&config, &id, patch) {
         Ok(job) => Json(serde_json::json!({"status": "ok", "job": job})).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

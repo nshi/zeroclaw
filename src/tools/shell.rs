@@ -131,11 +131,6 @@ impl Tool for ShellTool {
                 "command": {
                     "type": "string",
                     "description": "The shell command to execute. Runs via /bin/sh -c on Unix."
-                },
-                "approved": {
-                    "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk commands in supervised mode. Required for commands that modify files, install packages, or access the network.",
-                    "default": false
                 }
             },
             "required": ["command"]
@@ -144,10 +139,6 @@ impl Tool for ShellTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let command = require_str!(args, "command");
-        let approved = args
-            .get("approved")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
 
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
@@ -157,7 +148,7 @@ impl Tool for ShellTool {
             });
         }
 
-        match self.security.validate_command_execution(command, approved) {
+        match self.security.validate_command_execution(command) {
             Ok(_) => {}
             Err(reason) => {
                 return Ok(ToolResult {
@@ -309,7 +300,8 @@ mod tests {
                 .expect("schema required field should be an array")
                 .contains(&json!("command"))
         );
-        assert!(schema["properties"]["approved"].is_object());
+        // approved param was removed — risk is now harness-enforced
+        assert!(schema["properties"]["approved"].is_null());
     }
 
     #[tokio::test]
@@ -614,28 +606,17 @@ mod tests {
             ..SecurityPolicy::default()
         });
 
+        // validate_command_execution now returns (Medium, needs_approval=true)
+        // but the shell tool itself proceeds — the approval gate is in the
+        // agent loop, not here. The tool only blocks on hard policy errors.
         let tool = ShellTool::new(security.clone(), test_runtime());
-        let denied = tool
+        let result = tool
             .execute(json!({"command": "touch mentat_shell_approval_test"}))
             .await
-            .expect("unapproved command should return a result");
-        assert!(!denied.success);
-        assert!(
-            denied
-                .error
-                .as_deref()
-                .unwrap_or("")
-                .contains("explicit approval")
-        );
-
-        let allowed = tool
-            .execute(json!({
-                "command": "touch mentat_shell_approval_test",
-                "approved": true
-            }))
-            .await
-            .expect("approved command execution should succeed");
-        assert!(allowed.success);
+            .expect("medium-risk command should return a result");
+        // The tool succeeds because validate_command_execution returns Ok;
+        // the harness approval gate would have blocked it before reaching here.
+        assert!(result.success);
 
         let _ =
             tokio::fs::remove_file(std::env::temp_dir().join("mentat_shell_approval_test")).await;

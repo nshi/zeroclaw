@@ -80,11 +80,6 @@ impl Tool for CronUpdateTool {
                         "delivery": delivery_json_schema()
                     }
                 },
-                "approved": {
-                    "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk shell commands in supervised mode",
-                    "default": false
-                }
             },
             "required": ["job_id", "patch"]
         })
@@ -131,16 +126,11 @@ impl Tool for CronUpdateTool {
                 });
             }
         };
-        let approved = args
-            .get("approved")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-
         if let Some(blocked) = enforce_security_policy(&self.security, "cron_update") {
             return Ok(blocked);
         }
 
-        match cron::update_shell_job_with_approval(&self.config, job_id, patch, approved) {
+        match cron::update_shell_job_with_approval(&self.config, job_id, patch) {
             Ok(job) => Ok(ToolResult {
                 success: true,
                 output: serde_json::to_string_pretty(&job)?,
@@ -301,6 +291,8 @@ mod tests {
         let job = cron::add_job(&cfg, "*/5 * * * *", "echo ok").unwrap();
         let tool = CronUpdateTool::new(cfg.clone(), test_security(&cfg));
 
+        // The approved flag has been removed; medium-risk commands are always
+        // blocked at this layer regardless.
         let denied = tool
             .execute(json!({
                 "job_id": job.id,
@@ -315,16 +307,6 @@ mod tests {
                 .unwrap_or_default()
                 .contains("explicit approval")
         );
-
-        let approved = tool
-            .execute(json!({
-                "job_id": job.id,
-                "patch": { "command": "touch cron-update-approval-test" },
-                "approved": true
-            }))
-            .await
-            .unwrap();
-        assert!(approved.success, "{:?}", approved.error);
     }
 
     #[test]

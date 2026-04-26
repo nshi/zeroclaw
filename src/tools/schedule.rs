@@ -60,11 +60,6 @@ impl Tool for ScheduleTool {
                     "type": "string",
                     "description": "Shell command to execute. Required for create/add/once."
                 },
-                "approved": {
-                    "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk shell commands in supervised mode",
-                    "default": false
-                },
                 "id": {
                     "type": "string",
                     "description": "Task ID. Required for get/cancel/remove/pause/resume."
@@ -84,11 +79,7 @@ impl Tool for ScheduleTool {
                 self.handle_get(id)
             }
             "create" | "add" | "once" => {
-                let approved = args
-                    .get("approved")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
-                self.handle_create_like(action, &args, approved)
+                self.handle_create_like(action, &args)
             }
             "cancel" | "remove" => {
                 if let Some(blocked) = self.enforce_mutation_allowed(action) {
@@ -211,7 +202,6 @@ impl ScheduleTool {
         &self,
         action: &str,
         args: &serde_json::Value,
-        approved: bool,
     ) -> Result<ToolResult> {
         let command = require_str!(args, "command");
         if command.trim().is_empty() {
@@ -284,7 +274,6 @@ impl ScheduleTool {
                 },
                 command,
                 None,
-                approved,
             ) {
                 Ok(job) => job,
                 Err(error) => {
@@ -309,7 +298,7 @@ impl ScheduleTool {
         }
 
         if let Some(value) = delay {
-            let job = match cron::add_once_validated(&self.config, value, command, approved) {
+            let job = match cron::add_once_validated(&self.config, value, command) {
                 Ok(job) => job,
                 Err(error) => {
                     return Ok(ToolResult {
@@ -336,7 +325,7 @@ impl ScheduleTool {
             .map_err(|error| anyhow::anyhow!("Invalid run_at timestamp: {error}"))?
             .with_timezone(&Utc);
 
-        let job = match cron::add_once_at_validated(&self.config, run_at_parsed, command, approved)
+        let job = match cron::add_once_at_validated(&self.config, run_at_parsed, command)
         {
             Ok(job) => job,
             Err(error) => {
@@ -767,15 +756,7 @@ mod tests {
                 .contains("explicit approval")
         );
 
-        let approved = tool
-            .execute(json!({
-                "action": "create",
-                "expression": "*/5 * * * *",
-                "command": "touch schedule-policy-test",
-                "approved": true
-            }))
-            .await
-            .unwrap();
-        assert!(approved.success, "{:?}", approved.error);
+        // The approved flag has been removed; medium-risk commands are always
+        // blocked at this layer regardless.
     }
 }

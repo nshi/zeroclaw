@@ -116,10 +116,15 @@ impl Tool for SkillShellTool {
             });
         }
 
-        // Security validation — always requires explicit approval (approved=true)
-        // since skill tools are user-defined and should be treated as medium-risk.
-        match self.security.validate_command_execution(&command, true) {
-            Ok(_) => {}
+        // Security validation for skill tools (user-defined, treated as medium-risk).
+        match self.security.validate_command_execution(&command) {
+            Ok((_, needs_approval)) if needs_approval => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("Command requires explicit approval".into()),
+                });
+            }
             Err(reason) => {
                 return Ok(ToolResult {
                     success: false,
@@ -127,6 +132,7 @@ impl Tool for SkillShellTool {
                     error: Some(reason),
                 });
             }
+            Ok(_) => {}
         }
 
         if let Some(path) = self.security.forbidden_path_argument(&command) {
