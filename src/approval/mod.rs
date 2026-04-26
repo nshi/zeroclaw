@@ -299,6 +299,20 @@ impl ApprovalManager {
         response
     }
 
+    /// Record that a tool call was auto-approved (no prompt needed).
+    pub fn record_auto_approved(&self, tool_name: &str, channel: &str) {
+        tracing::debug!(tool = %tool_name, channel, "auto-approved tool call");
+        self.record_decision_ext(
+            tool_name,
+            &serde_json::Value::Null,
+            ApprovalResponse::Yes,
+            channel,
+            None,
+            None,
+            None,
+        );
+    }
+
     /// Record an approval decision and update session state.
     pub fn record_decision(
         &self,
@@ -307,6 +321,21 @@ impl ApprovalManager {
         decision: ApprovalResponse,
         channel: &str,
     ) {
+        match decision {
+            ApprovalResponse::Yes => {
+                tracing::info!(tool = %tool_name, channel, "tool call approved by user");
+            }
+            ApprovalResponse::No => {
+                tracing::info!(tool = %tool_name, channel, "tool call denied by user");
+            }
+            ApprovalResponse::Always => {
+                tracing::info!(tool = %tool_name, channel, "tool call always-approved by user");
+            }
+            ApprovalResponse::Timeout => {
+                tracing::info!(tool = %tool_name, channel, "tool call approval timed out");
+            }
+        }
+
         self.record_decision_ext(tool_name, args, decision, channel, None, None, None);
 
         // If "Always", add to session allowlist (unless in always_ask).
