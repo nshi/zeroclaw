@@ -396,6 +396,8 @@ impl Provider for OpenAiProvider {
             max_tokens: self.max_tokens,
         };
 
+        crate::observability::runtime_trace::trace_api_request(&request, "openai", model, None);
+
         let response = self
             .http_client()
             .post(format!("{}/chat/completions", self.base_url))
@@ -439,6 +441,13 @@ impl Provider for OpenAiProvider {
             tools,
             max_tokens: self.max_tokens,
         };
+
+        crate::observability::runtime_trace::trace_api_request(
+            &native_request,
+            "openai",
+            model,
+            request.turn_id,
+        );
 
         let response = self
             .http_client()
@@ -506,6 +515,13 @@ impl Provider for OpenAiProvider {
             tools: native_tools,
             max_tokens: self.max_tokens,
         };
+
+        crate::observability::runtime_trace::trace_api_request(
+            &native_request,
+            "openai",
+            model,
+            None,
+        );
 
         let response = self
             .http_client()

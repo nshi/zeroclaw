@@ -548,24 +548,6 @@ async fn handle_ollama_error(response: reqwest::Response) -> anyhow::Error {
     anyhow::anyhow!("Ollama API error ({status}): {sanitized}")
 }
 
-// ── Trace logging ──────────────────────────────────────────────────────────
-
-/// Log the actual API request payload to the runtime trace for debugging.
-fn trace_api_request(request: &OllamaChatRequest) {
-    if let Ok(payload) = serde_json::to_value(request) {
-        crate::observability::runtime_trace::record_event(
-            "provider_api_request",
-            None,
-            Some("ollama"),
-            Some(&request.model),
-            None,
-            None,
-            None,
-            payload,
-        );
-    }
-}
-
 // ── Provider trait implementation ───────────────────────────────────────────
 
 #[async_trait]
@@ -635,6 +617,12 @@ impl Provider for OllamaProvider {
             think,
             options: self.build_options(temperature),
         };
+        crate::observability::runtime_trace::trace_api_request(
+            &request,
+            "ollama",
+            &request.model,
+            None,
+        );
 
         let response = self
             .http_client()
@@ -667,7 +655,12 @@ impl Provider for OllamaProvider {
             think,
             options: self.build_options(temperature),
         };
-        trace_api_request(&request);
+        crate::observability::runtime_trace::trace_api_request(
+            &request,
+            "ollama",
+            &request.model,
+            None,
+        );
 
         let response = self
             .http_client()
@@ -708,7 +701,12 @@ impl Provider for OllamaProvider {
             think,
             options: self.build_options(temperature),
         };
-        trace_api_request(&api_request);
+        crate::observability::runtime_trace::trace_api_request(
+            &api_request,
+            "ollama",
+            &api_request.model,
+            None,
+        );
 
         let response = self
             .http_client()
@@ -759,7 +757,12 @@ impl Provider for OllamaProvider {
             think,
             options: self.build_options(temperature),
         };
-        trace_api_request(&api_request);
+        crate::observability::runtime_trace::trace_api_request(
+            &api_request,
+            "ollama",
+            &api_request.model,
+            request.turn_id,
+        );
 
         let client = self.http_client();
         let url = format!("{}/api/chat", self.base_url);

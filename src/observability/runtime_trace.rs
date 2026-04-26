@@ -229,6 +229,51 @@ pub fn record_event(
     }
 }
 
+/// Record a `provider_api_request` trace event with the full serialized request payload.
+///
+/// On serialization failure, records the event with `success: false` and the error message.
+pub fn trace_api_request<T: serde::Serialize>(
+    request: &T,
+    provider: &str,
+    model: &str,
+    turn_id: Option<&str>,
+) {
+    if TRACE_LOGGER
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_none()
+    {
+        return;
+    }
+
+    match serde_json::to_value(request) {
+        Ok(payload) => {
+            record_event(
+                "provider_api_request",
+                None,
+                Some(provider),
+                Some(model),
+                turn_id,
+                None,
+                None,
+                payload,
+            );
+        }
+        Err(err) => {
+            record_event(
+                "provider_api_request",
+                None,
+                Some(provider),
+                Some(model),
+                turn_id,
+                Some(false),
+                Some(&format!("serialization failed: {err}")),
+                serde_json::Value::Null,
+            );
+        }
+    }
+}
+
 /// Load recent runtime trace events from storage.
 pub fn load_events(
     path: &Path,
@@ -410,5 +455,85 @@ mod tests {
         let found = find_event_by_id(&path, target_id).unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, target_id);
+    }
+
+    #[test]
+    fn trace_api_request_happy_path_unit() {
+        // Test the logic directly without the global logger:
+        // trace_api_request calls serde_json::to_value then record_event.
+        // We verify that serde_json::to_value produces the expected payload.
+        #[derive(serde::Serialize)]
+        struct FakeRequest {
+            model: String,
+            messages: Vec<String>,
+        }
+
+        let req = FakeRequest {
+            model: "test-model".into(),
+            messages: vec!["hello".into()],
+        };
+
+        let payload = serde_json::to_value(&req).unwrap();
+        assert_eq!(payload["model"], "test-model");
+        assert_eq!(payload["messages"][0], "hello");
+    }
+
+    #[test]
+    fn trace_api_request_serialization_failure_unit() {
+        // Verify that a non-serializable type produces the expected error path.
+        struct BadSerialize;
+        impl serde::Serialize for BadSerialize {
+            fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional failure"))
+            }
+        }
+
+        let result = serde_json::to_value(&BadSerialize);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("intentional failure")
+        );
+    }
+
+    #[test]
+    fn trace_api_request_integration() {
+        // Full integration test via the global logger.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("trace.jsonl");
+
+        {
+            let logger = Arc::new(RuntimeTraceLogger::new(
+                RuntimeTraceStorageMode::Full,
+                10000,
+                path.clone(),
+            ));
+            let mut guard = TRACE_LOGGER.write().unwrap();
+            *guard = Some(logger);
+        }
+
+        #[derive(serde::Serialize)]
+        struct Req {
+            model: String,
+        }
+
+        trace_api_request(&Req { model: "m1".into() }, "prov1", "m1", Some("tid-1"));
+
+        {
+            let mut guard = TRACE_LOGGER.write().unwrap();
+            *guard = None;
+        }
+
+        let events = load_events(&path, 100, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.event_type, "provider_api_request");
+        assert_eq!(ev.provider.as_deref(), Some("prov1"));
+        assert_eq!(ev.model.as_deref(), Some("m1"));
+        assert_eq!(ev.turn_id.as_deref(), Some("tid-1"));
+        assert!(ev.success.is_none());
+        assert_eq!(ev.payload["model"], "m1");
     }
 }

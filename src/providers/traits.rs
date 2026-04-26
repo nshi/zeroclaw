@@ -104,6 +104,8 @@ pub struct ChatRequest<'a> {
     /// The prompt context needed by `build()`.
     /// `None` during incremental migration — will become required.
     pub prompt_context: Option<&'a crate::agent::prompt::PromptContext<'a>>,
+    /// Turn correlation ID for trace event linking.
+    pub turn_id: Option<&'a str>,
 }
 
 /// A tool result to feed back to the LLM.
@@ -907,6 +909,7 @@ mod tests {
             tools: Some(&tools),
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         };
 
         let response = provider.chat(request, "model", 0.7).await.unwrap();
@@ -926,6 +929,7 @@ mod tests {
             tools: None,
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         };
 
         let response = provider.chat(request, "model", 0.7).await.unwrap();
@@ -1028,6 +1032,7 @@ mod tests {
             tools: Some(&tools),
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         };
 
         let response = provider.chat(request, "model", 0.7).await.unwrap();
@@ -1052,6 +1057,7 @@ mod tests {
             tools: Some(&tools),
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         };
 
         let response = provider.chat(request, "model", 0.7).await.unwrap();
@@ -1076,6 +1082,7 @@ mod tests {
             tools: Some(&tools),
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         };
 
         let err = provider.chat(request, "model", 0.7).await.unwrap_err();
@@ -1126,6 +1133,7 @@ mod tests {
                 tools: None,
                 prompt_builder: None,
                 prompt_context: None,
+                turn_id: None,
             },
             "model",
             0.0,

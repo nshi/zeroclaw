@@ -1175,6 +1175,7 @@ mod tests {
                 tools: Some(&tools),
                 prompt_builder: None,
                 prompt_context: None,
+                turn_id: None,
             },
             "hint:reasoning",
             0.0,

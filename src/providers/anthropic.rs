@@ -784,6 +784,8 @@ impl Provider for AnthropicProvider {
             stream: None,
         };
 
+        crate::observability::runtime_trace::trace_api_request(&request, "anthropic", model, None);
+
         let mut request = self
             .http_client()
             .post(format!("{}/v1/messages", self.base_url))
@@ -849,6 +851,13 @@ impl Provider for AnthropicProvider {
             tool_choice,
             stream: None,
         };
+
+        crate::observability::runtime_trace::trace_api_request(
+            &native_request,
+            "anthropic",
+            model,
+            request.turn_id,
+        );
 
         let req = self
             .http_client()
@@ -923,6 +932,7 @@ impl Provider for AnthropicProvider {
             },
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         };
         self.chat(request, model, temperature).await
     }
@@ -999,6 +1009,13 @@ impl Provider for AnthropicProvider {
             tool_choice,
             stream: Some(true),
         };
+
+        crate::observability::runtime_trace::trace_api_request(
+            &native_request,
+            "anthropic",
+            model,
+            request.turn_id,
+        );
 
         let body = Self::build_streaming_request(&native_request);
         let client = self.http_client();

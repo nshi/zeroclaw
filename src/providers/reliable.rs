@@ -920,6 +920,7 @@ impl Provider for ReliableProvider {
                         tools: request.tools,
                         prompt_builder: None,
                         prompt_context: None,
+                        turn_id: request.turn_id,
                     };
                     match provider.chat(req, current_model, temperature).await {
                         Ok(resp) => {
@@ -1108,6 +1109,7 @@ impl Provider for ReliableProvider {
                 tools: request.tools,
                 prompt_builder: None,
                 prompt_context: None,
+                turn_id: request.turn_id,
             };
             let stream = provider.stream_chat(req, &current_model, temperature, options);
             let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
@@ -2124,6 +2126,7 @@ mod tests {
             tools: None,
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         };
         let result = provider.chat(request, "test-model", 0.0).await.unwrap();
 
@@ -2162,6 +2165,7 @@ mod tests {
             tools: None,
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         };
         let result = provider.chat(request, "test-model", 0.0).await.unwrap();
 
@@ -2235,6 +2239,7 @@ mod tests {
             tools: None,
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         };
         let err = provider
             .chat(request, "test", 0.0)
@@ -2354,6 +2359,7 @@ mod tests {
             tools: None,
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         };
         let result = provider.chat(request, "claude-opus", 0.0).await.unwrap();
         assert_eq!(result.text.as_deref(), Some("ok from sonnet"));
@@ -2404,6 +2410,7 @@ mod tests {
             tools: None,
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         };
         let result = provider.chat(request, "test", 0.0).await.unwrap();
         assert_eq!(result.text.as_deref(), Some("from fallback"));
@@ -2757,6 +2764,7 @@ mod tests {
                 tools: Some(&tools),
                 prompt_builder: None,
                 prompt_context: None,
+                turn_id: None,
             },
             "model",
             0.0,
@@ -2800,6 +2808,7 @@ mod tests {
                 tools: Some(&tools),
                 prompt_builder: None,
                 prompt_context: None,
+                turn_id: None,
             },
             "model",
             0.0,

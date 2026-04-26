@@ -1035,6 +1035,8 @@ impl GeminiProvider {
             },
         };
 
+        crate::observability::runtime_trace::trace_api_request(&request, "gemini", model, None);
+
         let url = Self::build_generate_content_url(model, auth);
 
         let mut response = self

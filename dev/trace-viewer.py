@@ -338,9 +338,6 @@ def _render_llm_request(payload: dict, event: dict | None = None) -> list[str]:
         return lines
     role = last_msg.get("role", "?")
     content = str(last_msg.get("content", ""))
-    # On the first iteration the last message is typically the user prompt;
-    # on subsequent iterations it's a tool result.  Show the role and full
-    # content so the developer can see exactly what was sent to the LLM.
     label = "System Prompt" if role == "system" else f"Last Message ({role})"
     lines.append(f"  {c(f'{label}:', 'bold')}")
     for line in content.split("\n"):
@@ -429,43 +426,102 @@ def _render_turn_final(payload: dict) -> list[str]:
 
 
 def _render_provider_api_request(payload: dict, event: dict | None = None) -> list[str]:
-    """Render the actual API request payload sent to a provider."""
+    """Render the actual API request payload sent to a provider.
+
+    Provider-aware: checks event.provider and renders provider-specific fields.
+    Common fields (model, message/content count, temperature, tools) are shared.
+    """
     lines = []
-    model = payload.get("model", "?")
     provider = (event or {}).get("provider", "?")
+    model = payload.get("model", "?")
     lines.append(f"  {c('Provider:', 'bold')} {c(provider, 'dim')}")
     lines.append(f"  {c('Model:', 'bold')} {c(model, 'dim')}")
-    stream = payload.get("stream", False)
-    lines.append(f"  {c('Stream:', 'bold')} {c(str(stream), 'dim')}")
 
-    # Options (temperature, num_ctx, etc.)
-    options = payload.get("options") or {}
-    if options:
-        parts = []
-        for k, v in options.items():
-            if v is not None:
-                parts.append(f"{k}={v}")
-        lines.append(f"  {c('Options:', 'bold')} {c(', '.join(parts), 'dim')}")
+    # Stream (common for most providers)
+    stream = payload.get("stream")
+    if stream is not None:
+        lines.append(f"  {c('Stream:', 'bold')} {c(str(stream), 'dim')}")
 
-    # Tools summary
+    # Temperature — common but located differently per provider
+    temp = payload.get("temperature")
+    if temp is None:
+        opts = payload.get("options") or {}
+        temp = opts.get("temperature")
+    gen_cfg = payload.get("generation_config") or payload.get("generationConfig") or {}
+    if temp is None:
+        temp = gen_cfg.get("temperature")
+    if temp is not None:
+        lines.append(f"  {c('Temperature:', 'bold')} {c(str(temp), 'dim')}")
+
+    # Provider-specific fields
+    if provider == "anthropic":
+        system = payload.get("system")
+        if system is not None:
+            label = "system (blocks)" if isinstance(system, list) else "system"
+            lines.append(f"  {c('System:', 'bold')} {c(label, 'dim')}")
+        tc = payload.get("tool_choice")
+        if tc is not None:
+            lines.append(f"  {c('Tool Choice:', 'bold')} {c(str(tc), 'dim')}")
+        mt = payload.get("max_tokens")
+        if mt is not None:
+            lines.append(f"  {c('Max Tokens:', 'bold')} {c(str(mt), 'dim')}")
+    elif provider == "ollama":
+        options = payload.get("options") or {}
+        if options:
+            parts = [f"{k}={v}" for k, v in options.items() if v is not None]
+            lines.append(f"  {c('Options:', 'bold')} {c(', '.join(parts), 'dim')}")
+        think = payload.get("think")
+        if think is not None:
+            lines.append(f"  {c('Think:', 'bold')} {c(str(think), 'dim')}")
+    elif provider == "openai":
+        mt = payload.get("max_tokens")
+        if mt is not None:
+            lines.append(f"  {c('Max Tokens:', 'bold')} {c(str(mt), 'dim')}")
+    elif provider == "gemini":
+        si = payload.get("system_instruction") or payload.get("systemInstruction")
+        if si is not None:
+            lines.append(f"  {c('System Instruction:', 'bold')} {c('present', 'dim')}")
+        if gen_cfg:
+            mot = gen_cfg.get("max_output_tokens") or gen_cfg.get("maxOutputTokens")
+            if mot is not None:
+                lines.append(f"  {c('Max Output Tokens:', 'bold')} {c(str(mot), 'dim')}")
+    elif provider == "openrouter":
+        cc = payload.get("cache_control")
+        if cc is not None:
+            lines.append(f"  {c('Cache Control:', 'bold')} {c(str(cc), 'dim')}")
+        sid = payload.get("session_id")
+        if sid is not None:
+            lines.append(f"  {c('Session ID:', 'bold')} {c(str(sid), 'dim')}")
+        mt = payload.get("max_tokens")
+        if mt is not None:
+            lines.append(f"  {c('Max Tokens:', 'bold')} {c(str(mt), 'dim')}")
+
+    # Tools summary (shared across all providers)
     tools = payload.get("tools") or []
     if tools:
-        names = [t.get("function", {}).get("name", "?") for t in tools]
+        names = []
+        for t in tools:
+            func = t.get("function", {})
+            name = func.get("name") if isinstance(func, dict) else None
+            names.append(name or t.get("name", "?"))
         lines.append(f"  {c(f'Tools ({len(names)}):', 'bold')} {c(', '.join(names), 'dim')}")
     else:
-        lines.append(f"  {c('Tools:', 'bold')} {c('none (prompt-guided)', 'dim')}")
+        lines.append(f"  {c('Tools:', 'bold')} {c('none', 'dim')}")
 
-    # Think mode
-    think = payload.get("think")
-    if think is not None:
-        lines.append(f"  {c('Think:', 'bold')} {c(str(think), 'dim')}")
-
-    # Messages summary
-    messages = payload.get("messages") or []
-    lines.append(f"  {c('Messages:', 'bold')} {len(messages)}")
+    # Messages / contents summary (Gemini uses "contents" instead of "messages")
+    messages = payload.get("messages") or payload.get("contents") or []
+    msg_label = "Contents" if "contents" in payload and "messages" not in payload else "Messages"
+    lines.append(f"  {c(f'{msg_label}:', 'bold')} {len(messages)}")
     for msg in messages:
         role = msg.get("role", "?")
+        # Content can be a string, list of parts, or nested
         content = msg.get("content", "")
+        if isinstance(content, list):
+            # Gemini parts or OpenAI multimodal
+            text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and "text" in p]
+            content = " ".join(text_parts) if text_parts else str(content)
+        elif not isinstance(content, str):
+            content = str(content) if content else ""
         has_images = bool(msg.get("images"))
         has_tool_calls = bool(msg.get("tool_calls"))
         suffix = ""
@@ -750,6 +806,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Dump all turns without interactive stepping",
     )
+    p.add_argument(
+        "--event-type",
+        default=None,
+        metavar="TYPE",
+        help="Filter to only show events of this type (e.g. provider_api_request)",
+    )
     return p
 
 
@@ -770,6 +832,18 @@ def main() -> None:
         sessions = search_sessions(args.file, args.search_term)
     else:
         sessions = recent_sessions(args.file, args.last)
+
+    # Apply --event-type filter: keep only matching events within each session,
+    # and drop sessions that become empty.
+    if args.event_type:
+        et = args.event_type.lower()
+        filtered = []
+        for s in sessions:
+            s.events = [e for e in s.events if (e.get("event_type", "").lower() == et)]
+            if s.events:
+                s.finalize()
+                filtered.append(s)
+        sessions = filtered
 
     if args.dump and sessions:
         display_session_list(sessions, search_term=args.search_term)

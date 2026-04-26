@@ -2050,6 +2050,7 @@ async fn consume_provider_streaming_response(
             tools: request_tools,
             prompt_builder: None,
             prompt_context: None,
+            turn_id: None,
         },
         model,
         temperature,
@@ -2552,7 +2553,6 @@ pub(crate) async fn run_tool_call_loop(
             serde_json::json!({
                 "iteration": iteration + 1,
                 "messages_count": history.len(),
-                "prompt": history,
             }),
         );
 
@@ -2649,6 +2649,7 @@ pub(crate) async fn run_tool_call_loop(
                                 tools: request_tools,
                                 prompt_builder: None,
                                 prompt_context: None,
+                                turn_id: Some(&turn_id),
                             },
                             active_model,
                             temperature,
@@ -2673,6 +2674,7 @@ pub(crate) async fn run_tool_call_loop(
                     tools: request_tools,
                     prompt_builder: None,
                     prompt_context: None,
+                    turn_id: Some(&turn_id),
                 },
                 active_model,
                 temperature,
@@ -3529,6 +3531,7 @@ pub(crate) async fn run_tool_call_loop(
         tools: None, // No tools — force a text response
         prompt_builder: None,
         prompt_context: None,
+        turn_id: None,
     };
     match provider.chat(summary_request, model, temperature).await {
         Ok(resp) => {

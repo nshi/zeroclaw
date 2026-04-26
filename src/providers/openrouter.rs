@@ -503,6 +503,8 @@ impl Provider for OpenRouterProvider {
             session_id,
         };
 
+        crate::observability::runtime_trace::trace_api_request(&request, "openrouter", model, None);
+
         let response = self
             .http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
@@ -556,6 +558,8 @@ impl Provider for OpenRouterProvider {
             session_id,
         };
 
+        crate::observability::runtime_trace::trace_api_request(&request, "openrouter", model, None);
+
         let response = self
             .http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
@@ -607,6 +611,13 @@ impl Provider for OpenRouterProvider {
             cache_control: is_anthropic_model(model).then(CacheControl::ephemeral),
             session_id,
         };
+
+        crate::observability::runtime_trace::trace_api_request(
+            &native_request,
+            "openrouter",
+            model,
+            request.turn_id,
+        );
 
         let response = self
             .http_client()
@@ -698,6 +709,13 @@ impl Provider for OpenRouterProvider {
             cache_control: is_anthropic_model(model).then(CacheControl::ephemeral),
             session_id,
         };
+
+        crate::observability::runtime_trace::trace_api_request(
+            &native_request,
+            "openrouter",
+            model,
+            None,
+        );
 
         let response = self
             .http_client()
