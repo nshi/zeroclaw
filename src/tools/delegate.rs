@@ -1127,6 +1127,7 @@ impl DelegateTool {
                 temperature,
                 true,
                 None,
+                None, // approval_adapter
                 "delegate",
                 None,
                 &self.multimodal_config,

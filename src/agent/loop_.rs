@@ -2178,6 +2178,7 @@ pub(crate) async fn agent_turn(
         temperature,
         silent,
         approval,
+        None, // approval_adapter
         channel_name,
         channel_reply_target,
         multimodal_config,
@@ -2330,6 +2331,7 @@ pub(crate) async fn run_tool_call_loop(
     temperature: f64,
     silent: bool,
     approval: Option<&ApprovalManager>,
+    approval_adapter: Option<&dyn crate::approval::ChannelApprovalAdapter>,
     channel_name: &str,
     channel_reply_target: Option<&str>,
     multimodal_config: &crate::config::MultimodalConfig,
@@ -3132,21 +3134,27 @@ pub(crate) async fn run_tool_call_loop(
             // ── Approval hook ────────────────────────────────
             if let Some(mgr) = approval {
                 if mgr.needs_approval(&tool_name) {
-                    let request = ApprovalRequest::new(
+                    let mut request = ApprovalRequest::new(
                         tool_name.clone(),
                         tool_args.clone(),
                     );
+                    request.channel = channel_name.to_string();
 
-                    // Interactive CLI: prompt the operator.
-                    // Non-interactive (channels): auto-deny since no operator
-                    // is present to approve.
-                    let decision = if mgr.is_non_interactive() {
+                    // Route through adapter when available; otherwise fall
+                    // back to the legacy is_non_interactive/prompt_cli path.
+                    let decision = if let Some(adapter) = approval_adapter {
+                        mgr.request_approval(adapter, &request).await
+                    } else if mgr.is_non_interactive() {
                         ApprovalResponse::No
                     } else {
                         mgr.prompt_cli(&request)
                     };
 
-                    mgr.record_decision(&tool_name, &tool_args, decision, channel_name);
+                    // record_decision is only needed for the legacy path —
+                    // request_approval already records internally.
+                    if approval_adapter.is_none() {
+                        mgr.record_decision(&tool_name, &tool_args, decision, channel_name);
+                    }
 
                     if decision == ApprovalResponse::No {
                         let denied = "Denied by user.".to_string();
@@ -3807,12 +3815,18 @@ pub async fn run(
         builder.build(&ctx).unwrap_or_default()
     };
 
-    // ── Approval manager (supervised mode) ───────────────────────
+    // ── Approval manager + adapter (supervised mode) ──────────────
     let approval_manager = if interactive {
         Some(ApprovalManager::from_config(&config.autonomy))
     } else {
         None
     };
+    let cli_approval_adapter: Option<Box<dyn crate::approval::ChannelApprovalAdapter>> =
+        if interactive {
+            Some(Box::new(crate::approval::CliApprovalAdapter))
+        } else {
+            None
+        };
     let channel_name = if interactive { "cli" } else { "daemon" };
     let memory_session_id = session_state_file.as_deref().and_then(|path| {
         let raw = path.to_string_lossy().trim().to_string();
@@ -3931,6 +3945,7 @@ pub async fn run(
                 effective_temperature,
                 false,
                 approval_manager.as_ref(),
+                cli_approval_adapter.as_deref(),
                 channel_name,
                 None,
                 &config.multimodal,
@@ -4232,6 +4247,7 @@ pub async fn run(
                     turn_temperature,
                     true,
                     approval_manager.as_ref(),
+                    cli_approval_adapter.as_deref(),
                     channel_name,
                     None,
                     &config.multimodal,
@@ -5755,6 +5771,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -5810,6 +5827,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &multimodal,
@@ -5859,6 +5877,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -5907,6 +5926,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -5962,6 +5982,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &multimodal,
@@ -6017,6 +6038,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &multimodal,
@@ -6073,6 +6095,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &multimodal,
@@ -6127,6 +6150,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &multimodal,
@@ -6181,6 +6205,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &multimodal,
@@ -6318,6 +6343,7 @@ mod tests {
             0.0,
             true,
             Some(&approval_mgr),
+            None, // approval_adapter
             "telegram",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -6392,6 +6418,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "telegram",
             Some("chat-42"),
             &crate::config::MultimodalConfig::default(),
@@ -6458,6 +6485,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "telegram",
             Some("chat-42"),
             &crate::config::MultimodalConfig::default(),
@@ -6519,6 +6547,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -6592,6 +6621,7 @@ mod tests {
             0.0,
             true,
             Some(&approval_mgr),
+            None, // approval_adapter
             "telegram",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -6656,6 +6686,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -6740,6 +6771,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -6801,6 +6833,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "cli",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -6888,6 +6921,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "telegram",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -6957,6 +6991,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "telegram",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -7028,6 +7063,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "telegram",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -7103,6 +7139,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "telegram",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -7187,6 +7224,7 @@ mod tests {
             0.0,
             true,
             None,
+            None, // approval_adapter
             "telegram",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -9268,6 +9306,7 @@ Let me check the result."#;
             0.0,
             true,
             None,
+            None, // approval_adapter
             "telegram",
             None,
             &crate::config::MultimodalConfig::default(),
@@ -9426,6 +9465,7 @@ Let me check the result."#;
                     0.0,
                     true,
                     None,
+                    None, // approval_adapter
                     "test",
                     None,
                     &crate::config::MultimodalConfig::default(),
@@ -9508,6 +9548,7 @@ Let me check the result."#;
                     0.0,
                     true,
                     None,
+                    None, // approval_adapter
                     "test",
                     None,
                     &crate::config::MultimodalConfig::default(),
@@ -9567,6 +9608,7 @@ Let me check the result."#;
             0.0,
             true,
             None,
+            None, // approval_adapter
             "test",
             None,
             &crate::config::MultimodalConfig::default(),
