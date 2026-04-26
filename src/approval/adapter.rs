@@ -81,18 +81,12 @@ pub struct CliApprovalAdapter;
 #[async_trait]
 impl ChannelApprovalAdapter for CliApprovalAdapter {
     async fn send_approval_request(&self, request: &ApprovalRequest) -> Result<PendingApproval> {
-        let summary = super::summarize_args(&request.arguments);
-        let tool_name = request.tool_name.clone();
-        let risk = request.risk_level;
-
-        // Write the prompt to stderr (non-blocking for the runtime).
+        let prompt = super::format_approval_prompt(request);
         eprintln!();
-        eprintln!("🔧 Agent wants to execute: {tool_name}");
-        eprintln!("   {summary}");
-        if let Some(ref r) = risk {
-            eprintln!("   Risk: {r:?}");
+        for line in prompt.lines() {
+            eprintln!("   {line}");
         }
-        eprint!("   [Y]es / [N]o / [A]lways for {tool_name}: ");
+        eprint!("   [Y]es / [N]o / [A]lways for {}: ", request.tool_name);
         let _ = std::io::Write::flush(&mut std::io::stderr());
 
         Ok(PendingApproval {
@@ -123,6 +117,14 @@ impl ChannelApprovalAdapter for CliApprovalAdapter {
     }
 }
 
+// ── Shared helpers ──────────────────────────────────────────────────
+
+/// Build a Telegram Bot API URL. Shared by `TelegramApprovalAdapter` and
+/// `TelegramChannel` (which has its own copy for historical reasons).
+fn telegram_api_url(api_base: &str, bot_token: &str, method: &str) -> String {
+    format!("{api_base}/bot{bot_token}/{method}")
+}
+
 // ── Telegram Adapter ────────────────────────────────────────────────
 
 /// Approval adapter for Telegram — sends a message and polls for reply-to
@@ -151,24 +153,12 @@ impl TelegramApprovalAdapter {
             thread_id,
         }
     }
-
-    fn api_url(&self, method: &str) -> String {
-        format!("{}/bot{}/{method}", self.api_base, self.bot_token)
-    }
 }
 
 #[async_trait]
 impl ChannelApprovalAdapter for TelegramApprovalAdapter {
     async fn send_approval_request(&self, request: &ApprovalRequest) -> Result<PendingApproval> {
-        let summary = super::summarize_args(&request.arguments);
-        let mut text = format!(
-            "🔧 Approval needed\n\nTool: {}\nArgs: {}",
-            request.tool_name, summary
-        );
-        if let Some(ref risk) = request.risk_level {
-            use std::fmt::Write;
-            let _ = write!(text, "\nRisk: {risk:?}");
-        }
+        let mut text = super::format_approval_prompt(request);
         text.push_str("\n\nReply to this message with:\n• y — approve once\n• n — deny\n• a — always approve this tool");
 
         let mut body = serde_json::json!({
@@ -182,7 +172,11 @@ impl ChannelApprovalAdapter for TelegramApprovalAdapter {
 
         let resp = self
             .client
-            .post(self.api_url("sendMessage"))
+            .post(telegram_api_url(
+                &self.api_base,
+                &self.bot_token,
+                "sendMessage",
+            ))
             .json(&body)
             .send()
             .await?;
@@ -222,7 +216,11 @@ impl ChannelApprovalAdapter for TelegramApprovalAdapter {
         loop {
             let resp = self
                 .client
-                .post(self.api_url("getUpdates"))
+                .post(telegram_api_url(
+                    &self.api_base,
+                    &self.bot_token,
+                    "getUpdates",
+                ))
                 .json(&serde_json::json!({
                     "offset": offset,
                     "timeout": 5,
@@ -262,6 +260,7 @@ impl ChannelApprovalAdapter for TelegramApprovalAdapter {
 
 /// Approval adapter for Slack — sends a thread reply and polls for responses.
 pub struct SlackApprovalAdapter {
+    client: reqwest::Client,
     bot_token: String,
     channel_id: String,
     thread_ts: Option<String>,
@@ -274,6 +273,7 @@ impl SlackApprovalAdapter {
         thread_ts: Option<String>,
     ) -> Self {
         Self {
+            client: reqwest::Client::new(),
             bot_token: bot_token.into(),
             channel_id: channel_id.into(),
             thread_ts,
@@ -284,18 +284,9 @@ impl SlackApprovalAdapter {
 #[async_trait]
 impl ChannelApprovalAdapter for SlackApprovalAdapter {
     async fn send_approval_request(&self, request: &ApprovalRequest) -> Result<PendingApproval> {
-        let summary = super::summarize_args(&request.arguments);
-        let mut text = format!(
-            "🔧 Approval needed\n\nTool: {}\nArgs: {}",
-            request.tool_name, summary
-        );
-        if let Some(ref risk) = request.risk_level {
-            use std::fmt::Write;
-            let _ = write!(text, "\nRisk: {risk:?}");
-        }
+        let mut text = super::format_approval_prompt(request);
         text.push_str("\n\nReply in this thread with:\n• y — approve once\n• n — deny\n• a — always approve this tool");
 
-        let client = reqwest::Client::new();
         let mut body = serde_json::json!({
             "channel": self.channel_id,
             "text": text,
@@ -304,7 +295,8 @@ impl ChannelApprovalAdapter for SlackApprovalAdapter {
             body["thread_ts"] = serde_json::Value::String(ts.clone());
         }
 
-        let resp = client
+        let resp = self
+            .client
             .post("https://slack.com/api/chat.postMessage")
             .bearer_auth(&self.bot_token)
             .json(&body)
@@ -339,9 +331,9 @@ impl ChannelApprovalAdapter for SlackApprovalAdapter {
             _ => anyhow::bail!("SlackApprovalAdapter got non-Slack PlatformRef"),
         };
 
-        let client = reqwest::Client::new();
         loop {
-            let resp = client
+            let resp = self
+                .client
                 .get("https://slack.com/api/conversations.replies")
                 .bearer_auth(&self.bot_token)
                 .query(&[
@@ -578,8 +570,11 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn mock_adapter_send_receive_lifecycle() {
         let adapter = MockApprovalAdapter::new(ApprovalResponse::Always);
-        let request =
-            ApprovalRequest::new("file_write".into(), serde_json::json!({"path": "test.txt"}));
+        let request = ApprovalRequest::new(
+            "file_write".into(),
+            serde_json::json!({"path": "test.txt"}),
+            "test",
+        );
 
         let pending = adapter.send_approval_request(&request).await.unwrap();
         assert_eq!(pending.request_id, request.request_id);
@@ -591,7 +586,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn failing_adapter_returns_error() {
         let adapter = FailingApprovalAdapter;
-        let request = ApprovalRequest::new("file_write".into(), serde_json::json!({}));
+        let request = ApprovalRequest::new("file_write".into(), serde_json::json!({}), "test");
 
         let result = adapter.send_approval_request(&request).await;
         assert!(result.is_err());

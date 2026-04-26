@@ -50,19 +50,35 @@ pub struct ApprovalRequest {
 }
 
 impl ApprovalRequest {
-    /// Create a minimal request (backward-compatible with existing callers).
-    pub fn new(tool_name: String, arguments: serde_json::Value) -> Self {
+    pub fn new(tool_name: String, arguments: serde_json::Value, channel: &str) -> Self {
         Self {
             tool_name,
             arguments,
             request_id: uuid::Uuid::new_v4().to_string(),
-            channel: String::new(),
+            channel: channel.to_string(),
             recipient: String::new(),
             thread_ts: None,
             risk_level: None,
             created_at: Some(Utc::now()),
         }
     }
+}
+
+/// Format the common approval prompt body shared by all adapters.
+///
+/// Returns the tool/args/risk section. Each adapter appends its own
+/// platform-specific response instructions.
+pub fn format_approval_prompt(request: &ApprovalRequest) -> String {
+    let summary = summarize_args(&request.arguments);
+    let mut text = format!(
+        "🔧 Approval needed\n\nTool: {}\nArgs: {}",
+        request.tool_name, summary
+    );
+    if let Some(ref risk) = request.risk_level {
+        use std::fmt::Write;
+        let _ = write!(text, "\nRisk: {risk:?}");
+    }
+    text
 }
 
 /// The user's response to an approval request.
@@ -206,9 +222,8 @@ impl ApprovalManager {
 
     /// Check whether a shell command requires approval based on its risk level.
     ///
-    /// Uses the harness `SecurityPolicy` to classify risk, returning `true` for
-    /// Medium+ risk commands in supervised mode when `require_approval_for_medium_risk`
-    /// is set. Low-risk commands pass without prompting.
+    /// Delegates to [`SecurityPolicy::validate_command_execution`] and inspects the
+    /// `needs_approval` flag from the returned tuple.
     pub fn needs_shell_approval(&self, command: &str, security: &SecurityPolicy) -> bool {
         if self.autonomy_level == AutonomyLevel::Full {
             return false;
@@ -217,14 +232,9 @@ impl ApprovalManager {
             return false;
         }
 
-        let risk = security.command_risk_level(command);
-        match risk {
-            CommandRiskLevel::Low => false,
-            CommandRiskLevel::Medium => {
-                security.require_approval_for_medium_risk
-                    && self.autonomy_level == AutonomyLevel::Supervised
-            }
-            CommandRiskLevel::High => self.autonomy_level == AutonomyLevel::Supervised,
+        match security.validate_command_execution(command) {
+            Ok((_risk, needs_approval)) => needs_approval,
+            Err(_) => false, // hard-blocked commands are denied before approval
         }
     }
 
@@ -292,15 +302,7 @@ impl ApprovalManager {
             Some(elapsed_ms),
         );
 
-        // Handle "Always" → add to session allowlist (unless in always_ask).
-        if response == ApprovalResponse::Always
-            && !self.always_ask.contains(&request.tool_name)
-            && !self.always_ask.contains("*")
-        {
-            let mut allowlist = self.session_allowlist.lock();
-            allowlist.insert(request.tool_name.clone());
-        }
-
+        self.maybe_add_to_allowlist(&request.tool_name, response);
         response
     }
 
@@ -342,8 +344,12 @@ impl ApprovalManager {
         }
 
         self.record_decision_ext(tool_name, args, decision, channel, None, None, None);
+        self.maybe_add_to_allowlist(tool_name, decision);
+    }
 
-        // If "Always", add to session allowlist (unless in always_ask).
+    /// If the decision is "Always" and the tool is not in `always_ask`,
+    /// add it to the session allowlist so future calls skip prompting.
+    fn maybe_add_to_allowlist(&self, tool_name: &str, decision: ApprovalResponse) {
         if decision == ApprovalResponse::Always
             && !self.always_ask.contains(tool_name)
             && !self.always_ask.contains("*")
@@ -406,12 +412,10 @@ impl ApprovalManager {
 
 /// Display the approval prompt and read user input from stdin.
 fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
-    let summary = summarize_args(&request.arguments);
+    let prompt = format_approval_prompt(request);
     eprintln!();
-    eprintln!("🔧 Agent wants to execute: {}", request.tool_name);
-    eprintln!("   {summary}");
-    if let Some(ref risk) = request.risk_level {
-        eprintln!("   Risk: {risk:?}");
+    for line in prompt.lines() {
+        eprintln!("   {line}");
     }
     eprint!("   [Y]es / [N]o / [A]lways for {}: ", request.tool_name);
     let _ = io::stderr().flush();
@@ -680,7 +684,11 @@ mod tests {
 
     #[test]
     fn approval_request_serde() {
-        let req = ApprovalRequest::new("shell".into(), serde_json::json!({"command": "echo hi"}));
+        let req = ApprovalRequest::new(
+            "shell".into(),
+            serde_json::json!({"command": "echo hi"}),
+            "test",
+        );
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ApprovalRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tool_name, "shell");
@@ -689,7 +697,7 @@ mod tests {
 
     #[test]
     fn approval_request_new_has_defaults() {
-        let req = ApprovalRequest::new("file_write".into(), serde_json::json!({}));
+        let req = ApprovalRequest::new("file_write".into(), serde_json::json!({}), "test");
         assert!(!req.request_id.is_empty());
         assert!(req.created_at.is_some());
         assert!(req.risk_level.is_none());
@@ -739,11 +747,18 @@ mod tests {
         assert!(!mgr.needs_shell_approval("git status", &security));
     }
 
+    fn security_with_all_commands() -> SecurityPolicy {
+        SecurityPolicy {
+            allowed_commands: vec!["*".into()],
+            ..SecurityPolicy::default()
+        }
+    }
+
     #[test]
     fn needs_shell_approval_medium_risk_prompts() {
         let config = supervised_config();
         let mgr = ApprovalManager::from_config(&config);
-        let security = SecurityPolicy::default();
+        let security = security_with_all_commands();
         assert!(mgr.needs_shell_approval("touch file.txt", &security));
     }
 
@@ -751,7 +766,13 @@ mod tests {
     fn needs_shell_approval_high_risk_prompts() {
         let config = supervised_config();
         let mgr = ApprovalManager::from_config(&config);
-        let security = SecurityPolicy::default();
+        // Must explicitly allow `rm` and disable block_high_risk_commands
+        // to reach the approval gate instead of the hard-block path.
+        let security = SecurityPolicy {
+            allowed_commands: vec!["rm".into()],
+            block_high_risk_commands: false,
+            ..SecurityPolicy::default()
+        };
         assert!(mgr.needs_shell_approval("rm -rf /tmp/test", &security));
     }
 
@@ -759,7 +780,7 @@ mod tests {
     fn needs_shell_approval_full_autonomy_never_prompts() {
         let config = full_config();
         let mgr = ApprovalManager::from_config(&config);
-        let security = SecurityPolicy::default();
+        let security = security_with_all_commands();
         assert!(!mgr.needs_shell_approval("rm -rf /tmp/test", &security));
     }
 
@@ -773,6 +794,7 @@ mod tests {
         let mgr = ApprovalManager::from_config(&config);
         let security = SecurityPolicy {
             require_approval_for_medium_risk: false,
+            allowed_commands: vec!["*".into()],
             ..SecurityPolicy::default()
         };
         assert!(!mgr.needs_shell_approval("touch file.txt", &security));
@@ -856,8 +878,11 @@ mod tests {
         let mgr = ApprovalManager::from_config(&config);
         let adapter = MockApprovalAdapter::new(ApprovalResponse::Yes);
 
-        let request =
-            ApprovalRequest::new("file_write".into(), serde_json::json!({"path": "test.txt"}));
+        let request = ApprovalRequest::new(
+            "file_write".into(),
+            serde_json::json!({"path": "test.txt"}),
+            "test",
+        );
 
         let result = mgr.request_approval(&adapter, &request).await;
         assert_eq!(result, ApprovalResponse::Yes);
@@ -876,8 +901,11 @@ mod tests {
         let mgr = ApprovalManager::from_config(&config);
         let adapter = MockApprovalAdapter::new(ApprovalResponse::Always);
 
-        let request =
-            ApprovalRequest::new("file_write".into(), serde_json::json!({"path": "test.txt"}));
+        let request = ApprovalRequest::new(
+            "file_write".into(),
+            serde_json::json!({"path": "test.txt"}),
+            "test",
+        );
 
         let result = mgr.request_approval(&adapter, &request).await;
         assert_eq!(result, ApprovalResponse::Always);
@@ -892,7 +920,8 @@ mod tests {
         let mgr = ApprovalManager::from_config(&config);
         let adapter = MockApprovalAdapter::new(ApprovalResponse::Always);
 
-        let request = ApprovalRequest::new("shell".into(), serde_json::json!({"command": "ls"}));
+        let request =
+            ApprovalRequest::new("shell".into(), serde_json::json!({"command": "ls"}), "test");
 
         let result = mgr.request_approval(&adapter, &request).await;
         assert_eq!(result, ApprovalResponse::Always);
@@ -911,8 +940,11 @@ mod tests {
         let mgr = ApprovalManager::from_config(&config);
         let adapter = HangingApprovalAdapter;
 
-        let request =
-            ApprovalRequest::new("file_write".into(), serde_json::json!({"path": "test.txt"}));
+        let request = ApprovalRequest::new(
+            "file_write".into(),
+            serde_json::json!({"path": "test.txt"}),
+            "test",
+        );
 
         let result = mgr.request_approval(&adapter, &request).await;
         assert_eq!(result, ApprovalResponse::Timeout);
@@ -930,8 +962,11 @@ mod tests {
         let mgr = ApprovalManager::from_config(&config);
         let adapter = MockApprovalAdapter::new(ApprovalResponse::No);
 
-        let request =
-            ApprovalRequest::new("file_write".into(), serde_json::json!({"path": "test.txt"}));
+        let request = ApprovalRequest::new(
+            "file_write".into(),
+            serde_json::json!({"path": "test.txt"}),
+            "test",
+        );
 
         let result = mgr.request_approval(&adapter, &request).await;
         assert_eq!(result, ApprovalResponse::No);
