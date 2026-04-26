@@ -11,6 +11,14 @@ use uuid::Uuid;
 
 const DEFAULT_TRACE_REL_PATH: &str = "state/runtime-trace.jsonl";
 
+tokio::task_local! {
+    /// Provider session ID for the current message-processing scope.
+    /// Set in `channels::process_channel_message` so that every
+    /// `record_event` / `trace_api_request` inside the scope automatically
+    /// carries the session identifier.
+    pub static RUNTIME_TRACE_SESSION_ID: Option<String>;
+}
+
 /// Runtime trace storage policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTraceStorageMode {
@@ -41,6 +49,8 @@ pub struct RuntimeTraceEvent {
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -211,6 +221,11 @@ pub fn record_event(
         return;
     };
 
+    let session_id = RUNTIME_TRACE_SESSION_ID
+        .try_with(|sid| sid.clone())
+        .ok()
+        .flatten();
+
     let event = RuntimeTraceEvent {
         id: Uuid::new_v4().to_string(),
         timestamp: Local::now().to_rfc3339(),
@@ -218,6 +233,7 @@ pub fn record_event(
         channel: channel.map(str::to_string),
         provider: provider.map(str::to_string),
         model: model.map(str::to_string),
+        session_id,
         turn_id: turn_id.map(str::to_string),
         success,
         message: message.map(str::to_string),
@@ -417,6 +433,7 @@ mod tests {
                 channel: None,
                 provider: None,
                 model: None,
+                session_id: None,
                 turn_id: None,
                 success: None,
                 message: Some(format!("event-{i}")),
@@ -445,6 +462,7 @@ mod tests {
             channel: Some("telegram".into()),
             provider: Some("openrouter".into()),
             model: Some("x".into()),
+            session_id: None,
             turn_id: Some("turn-1".into()),
             success: Some(false),
             message: Some("boom".into()),
