@@ -839,12 +839,16 @@ impl SecurityPolicy {
     // This ordering ensures deny-by-default: unknown commands are rejected
     // before any risk or autonomy logic runs.
 
-    /// Validate full command execution policy (allowlist + risk gate).
+    /// Validate command execution policy (allowlist + risk classification).
+    ///
+    /// Returns `(risk_level, needs_approval)` where `needs_approval` is `true`
+    /// when the command requires user approval before execution. Hard-blocked
+    /// commands (high-risk + `block_high_risk_commands` + not explicitly allowed)
+    /// return `Err` — they cannot be overridden even with approval.
     pub fn validate_command_execution(
         &self,
         command: &str,
-        approved: bool,
-    ) -> Result<CommandRiskLevel, String> {
+    ) -> Result<(CommandRiskLevel, bool), String> {
         if !self.is_command_allowed(command) {
             return Err(format!("Command not allowed by security policy: {command}"));
         }
@@ -857,32 +861,26 @@ impl SecurityPolicy {
         // autonomy gates entirely.  See #4485.
         let has_wildcard = self.allowed_commands.iter().any(|c| c.trim() == "*");
         if has_wildcard && !self.block_high_risk_commands {
-            return Ok(risk);
+            return Ok((risk, false));
         }
 
         if risk == CommandRiskLevel::High {
             if self.block_high_risk_commands && !self.is_command_explicitly_allowed(command) {
                 return Err("Command blocked: high-risk command is disallowed by policy".into());
             }
-            if self.autonomy == AutonomyLevel::Supervised && !approved {
-                return Err(
-                    "Command requires explicit approval (approved=true): high-risk operation"
-                        .into(),
-                );
+            if self.autonomy == AutonomyLevel::Supervised {
+                return Ok((risk, true));
             }
         }
 
         if risk == CommandRiskLevel::Medium
             && self.autonomy == AutonomyLevel::Supervised
             && self.require_approval_for_medium_risk
-            && !approved
         {
-            return Err(
-                "Command requires explicit approval (approved=true): medium-risk operation".into(),
-            );
+            return Ok((risk, true));
         }
 
-        Ok(risk)
+        Ok((risk, false))
     }
 
     /// Returns unquoted segments that are NOT comments (i.e. not starting with `#`).
@@ -1646,7 +1644,7 @@ mod tests {
         assert!(p.is_command_allowed("/usr/bin/antigravity"));
 
         // Wildcard still respects risk gates in validate_command_execution.
-        let blocked = p.validate_command_execution("rm -rf /tmp/test", true);
+        let blocked = p.validate_command_execution("rm -rf /tmp/test");
         assert!(blocked.is_err());
         assert!(blocked.unwrap_err().contains("high-risk"));
     }
@@ -1735,12 +1733,8 @@ mod tests {
             ..SecurityPolicy::default()
         };
 
-        let denied = p.validate_command_execution("touch test.txt", false);
-        assert!(denied.is_err());
-        assert!(denied.unwrap_err().contains("requires explicit approval"),);
-
-        let allowed = p.validate_command_execution("touch test.txt", true);
-        assert_eq!(allowed.unwrap(), CommandRiskLevel::Medium);
+        let result = p.validate_command_execution("touch test.txt");
+        assert_eq!(result.unwrap(), (CommandRiskLevel::Medium, true));
     }
 
     #[test]
@@ -1754,7 +1748,7 @@ mod tests {
             ..SecurityPolicy::default()
         };
 
-        let result = p.validate_command_execution("rm -rf /tmp/test", true);
+        let result = p.validate_command_execution("rm -rf /tmp/test");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("high-risk"));
     }
@@ -1771,8 +1765,8 @@ mod tests {
             ..SecurityPolicy::default()
         };
 
-        let result = p.validate_command_execution("curl https://api.example.com/data", true);
-        assert_eq!(result.unwrap(), CommandRiskLevel::High);
+        let result = p.validate_command_execution("curl https://api.example.com/data");
+        assert_eq!(result.unwrap(), (CommandRiskLevel::High, false));
     }
 
     #[test]
@@ -1785,8 +1779,8 @@ mod tests {
         };
 
         let result =
-            p.validate_command_execution("wget https://releases.example.com/v1.tar.gz", true);
-        assert_eq!(result.unwrap(), CommandRiskLevel::High);
+            p.validate_command_execution("wget https://releases.example.com/v1.tar.gz");
+        assert_eq!(result.unwrap(), (CommandRiskLevel::High, false));
     }
 
     #[test]
@@ -1799,7 +1793,7 @@ mod tests {
             ..SecurityPolicy::default()
         };
 
-        let result = p.validate_command_execution("wget https://evil.com", true);
+        let result = p.validate_command_execution("wget https://evil.com");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not allowed"));
     }
@@ -1814,15 +1808,14 @@ mod tests {
             ..SecurityPolicy::default()
         };
 
-        let result = p.validate_command_execution("rm -rf /tmp/test", true);
-        assert_eq!(result.unwrap(), CommandRiskLevel::High);
+        let result = p.validate_command_execution("rm -rf /tmp/test");
+        assert_eq!(result.unwrap(), (CommandRiskLevel::High, false));
     }
 
     #[test]
     fn validate_command_high_risk_still_needs_approval_in_supervised() {
-        // Even when explicitly allowed, supervised mode still requires
-        // approval for high-risk commands (the approval gate is separate
-        // from the block gate).
+        // Even when explicitly allowed, supervised mode returns needs_approval=true
+        // for high-risk commands.
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             allowed_commands: vec!["curl".into()],
@@ -1830,12 +1823,8 @@ mod tests {
             ..SecurityPolicy::default()
         };
 
-        let denied = p.validate_command_execution("curl https://api.example.com", false);
-        assert!(denied.is_err());
-        assert!(denied.unwrap_err().contains("requires explicit approval"));
-
-        let allowed = p.validate_command_execution("curl https://api.example.com", true);
-        assert_eq!(allowed.unwrap(), CommandRiskLevel::High);
+        let result = p.validate_command_execution("curl https://api.example.com");
+        assert_eq!(result.unwrap(), (CommandRiskLevel::High, true));
     }
 
     #[test]
@@ -1849,8 +1838,8 @@ mod tests {
             ..SecurityPolicy::default()
         };
 
-        let result = p.validate_command_execution("curl https://api.example.com | grep data", true);
-        assert_eq!(result.unwrap(), CommandRiskLevel::High);
+        let result = p.validate_command_execution("curl https://api.example.com | grep data");
+        assert_eq!(result.unwrap(), (CommandRiskLevel::High, false));
     }
 
     #[test]
@@ -1862,14 +1851,14 @@ mod tests {
             ..SecurityPolicy::default()
         };
 
-        let result = p.validate_command_execution("touch test.txt", false);
-        assert_eq!(result.unwrap(), CommandRiskLevel::Medium);
+        let result = p.validate_command_execution("touch test.txt");
+        assert_eq!(result.unwrap(), (CommandRiskLevel::Medium, false));
     }
 
     #[test]
     fn validate_command_rejects_background_chain_bypass() {
         let p = default_policy();
-        let result = p.validate_command_execution("ls & python3 -c 'print(1)'", false);
+        let result = p.validate_command_execution("ls & python3 -c 'print(1)'");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not allowed"));
     }
@@ -3186,12 +3175,12 @@ mod tests {
             ..SecurityPolicy::default()
         };
         assert!(
-            p.validate_command_execution("rm -rf /tmp/test", true)
+            p.validate_command_execution("rm -rf /tmp/test")
                 .is_ok()
         );
-        assert!(p.validate_command_execution("nohup firefox", true).is_ok());
+        assert!(p.validate_command_execution("nohup firefox").is_ok());
         assert!(
-            p.validate_command_execution("ls /usr/bin/firefox", true)
+            p.validate_command_execution("ls /usr/bin/firefox")
                 .is_ok()
         );
     }
@@ -3206,7 +3195,7 @@ mod tests {
             block_high_risk_commands: true,
             ..SecurityPolicy::default()
         };
-        let result = p.validate_command_execution("rm -rf /tmp/test", true);
+        let result = p.validate_command_execution("rm -rf /tmp/test");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("high-risk"));
     }

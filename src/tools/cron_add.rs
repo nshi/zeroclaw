@@ -76,11 +76,6 @@ impl Tool for CronAddTool {
                     "type": "boolean",
                     "description": "If true, the job is automatically deleted after its first successful run. Defaults to true for 'at' schedules."
                 },
-                "approved": {
-                    "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk shell commands in supervised mode",
-                    "default": false
-                }
             },
             "required": ["schedule", "job_type"]
         })
@@ -144,10 +139,6 @@ impl Tool for CronAddTool {
             .get("delete_after_run")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(default_delete_after_run);
-        let approved = args
-            .get("approved")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
         let delivery = match args.get("delivery") {
             Some(v) => match serde_json::from_value::<DeliveryConfig>(v.clone()) {
                 Ok(cfg) => Some(cfg),
@@ -175,14 +166,6 @@ impl Tool for CronAddTool {
                     }
                 };
 
-                if let Err(reason) = self.security.validate_command_execution(command, approved) {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(reason),
-                    });
-                }
-
                 if let Some(blocked) = enforce_security_policy(&self.security, "cron_add") {
                     return Ok(blocked);
                 }
@@ -193,7 +176,6 @@ impl Tool for CronAddTool {
                     schedule,
                     command,
                     delivery,
-                    approved,
                 )
             }
             JobType::Agent => {
@@ -480,16 +462,8 @@ mod tests {
                 .contains("explicit approval")
         );
 
-        let approved = tool
-            .execute(json!({
-                "schedule": { "kind": "cron", "expr": "*/5 * * * *" },
-                "job_type": "shell",
-                "command": "touch cron-approval-test",
-                "approved": true
-            }))
-            .await
-            .unwrap();
-        assert!(approved.success, "{:?}", approved.error);
+        // The approved flag has been removed; medium-risk commands are always
+        // blocked at this layer regardless.
     }
 
     #[tokio::test]

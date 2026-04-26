@@ -33,12 +33,7 @@ impl Tool for CronRunTool {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-                "job_id": { "type": "string" },
-                "approved": {
-                    "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk shell commands in supervised mode",
-                    "default": false
-                }
+                "job_id": { "type": "string" }
             },
             "required": ["job_id"]
         })
@@ -63,11 +58,6 @@ impl Tool for CronRunTool {
                 });
             }
         };
-        let approved = args
-            .get("approved")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-
         if !self.security.can_act() {
             return Ok(ToolResult {
                 success: false,
@@ -96,15 +86,22 @@ impl Tool for CronRunTool {
         };
 
         if matches!(job.job_type, JobType::Shell) {
-            if let Err(reason) = self
-                .security
-                .validate_command_execution(&job.command, approved)
-            {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(reason),
-                });
+            match self.security.validate_command_execution(&job.command) {
+                Ok((_, true)) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("Command requires explicit approval".into()),
+                    });
+                }
+                Err(reason) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(reason),
+                    });
+                }
+                Ok((_, false)) => {}
             }
         }
 
@@ -236,9 +233,19 @@ mod tests {
         config.autonomy.allowed_commands = vec!["touch".into()];
         std::fs::create_dir_all(&config.workspace_dir).unwrap();
         let cfg = Arc::new(config);
-        // Create with explicit approval so the job persists for the run test.
+        // Create the job using Full autonomy config so medium-risk is not blocked at creation.
+        let full_cfg = Arc::new(Config {
+            workspace_dir: cfg.workspace_dir.clone(),
+            config_path: cfg.config_path.clone(),
+            autonomy: crate::config::AutonomyConfig {
+                level: AutonomyLevel::Full,
+                allowed_commands: vec!["touch".into()],
+                ..crate::config::AutonomyConfig::default()
+            },
+            ..Config::default()
+        });
         let job = cron::add_shell_job_with_approval(
-            &cfg,
+            &full_cfg,
             None,
             cron::Schedule::Cron {
                 expr: "*/5 * * * *".into(),
@@ -246,7 +253,6 @@ mod tests {
             },
             "touch cron-run-approval",
             None,
-            true,
         )
         .unwrap();
         let tool = CronRunTool::new(cfg.clone(), test_security(&cfg));

@@ -27,9 +27,9 @@ pub use types::{
 ///
 /// Returns `Ok(())` if the command passes all checks, or an error describing
 /// why it was blocked.
-pub fn validate_shell_command(config: &Config, command: &str, approved: bool) -> Result<()> {
+pub fn validate_shell_command(config: &Config, command: &str) -> Result<()> {
     let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
-    validate_shell_command_with_security(&security, command, approved)
+    validate_shell_command_with_security(&security, command)
 }
 
 /// Validate a shell command using an existing `SecurityPolicy` instance.
@@ -38,12 +38,14 @@ pub fn validate_shell_command(config: &Config, command: &str, approved: bool) ->
 pub(crate) fn validate_shell_command_with_security(
     security: &SecurityPolicy,
     command: &str,
-    approved: bool,
 ) -> Result<()> {
-    security
-        .validate_command_execution(command, approved)
-        .map(|_| ())
-        .map_err(|reason| anyhow!("blocked by security policy: {reason}"))
+    let (_, needs_approval) = security
+        .validate_command_execution(command)
+        .map_err(|reason| anyhow!("blocked by security policy: {reason}"))?;
+    if needs_approval {
+        bail!("blocked by security policy: command requires explicit approval");
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_delivery_config(delivery: Option<&DeliveryConfig>) -> Result<()> {
@@ -89,9 +91,8 @@ pub fn add_shell_job_with_approval(
     schedule: Schedule,
     command: &str,
     delivery: Option<DeliveryConfig>,
-    approved: bool,
 ) -> Result<CronJob> {
-    validate_shell_command(config, command, approved)?;
+    validate_shell_command(config, command)?;
     validate_delivery_config(delivery.as_ref())?;
     store::add_shell_job(config, name, schedule, command, delivery)
 }
@@ -103,10 +104,9 @@ pub fn update_shell_job_with_approval(
     config: &Config,
     job_id: &str,
     patch: CronJobPatch,
-    approved: bool,
 ) -> Result<CronJob> {
     if let Some(command) = patch.command.as_deref() {
-        validate_shell_command(config, command, approved)?;
+        validate_shell_command(config, command)?;
     }
     update_job(config, job_id, patch)
 }
@@ -116,11 +116,10 @@ pub fn add_once_validated(
     config: &Config,
     delay: &str,
     command: &str,
-    approved: bool,
 ) -> Result<CronJob> {
     let duration = parse_delay(delay)?;
     let at = chrono::Utc::now() + duration;
-    add_once_at_validated(config, at, command, approved)
+    add_once_at_validated(config, at, command)
 }
 
 /// Create a one-shot validated shell job at an absolute timestamp.
@@ -128,13 +127,12 @@ pub fn add_once_at_validated(
     config: &Config,
     at: chrono::DateTime<chrono::Utc>,
     command: &str,
-    approved: bool,
 ) -> Result<CronJob> {
     let schedule = Schedule::At { at };
-    add_shell_job_with_approval(config, None, schedule, command, None, approved)
+    add_shell_job_with_approval(config, None, schedule, command, None)
 }
 
-// Convenience wrappers for CLI paths (default approved=false).
+// Convenience wrappers for CLI paths.
 
 pub(crate) fn add_shell_job(
     config: &Config,
@@ -142,7 +140,7 @@ pub(crate) fn add_shell_job(
     schedule: Schedule,
     command: &str,
 ) -> Result<CronJob> {
-    add_shell_job_with_approval(config, name, schedule, command, None, false)
+    add_shell_job_with_approval(config, name, schedule, command, None)
 }
 
 pub(crate) fn add_job(config: &Config, expression: &str, command: &str) -> Result<CronJob> {
@@ -420,7 +418,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
                 ..CronJobPatch::default()
             };
 
-            let job = update_shell_job_with_approval(config, &id, patch, false)?;
+            let job = update_shell_job_with_approval(config, &id, patch)?;
             println!("\u{2705} Updated cron job {}", job.id);
             println!("  Expr: {}", job.expression);
             println!("  Next: {}", job.next_run.to_rfc3339());
@@ -446,7 +444,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
 }
 
 pub(crate) fn add_once(config: &Config, delay: &str, command: &str) -> Result<CronJob> {
-    add_once_validated(config, delay, command, false)
+    add_once_validated(config, delay, command)
 }
 
 pub(crate) fn add_once_at(
@@ -454,7 +452,7 @@ pub(crate) fn add_once_at(
     at: chrono::DateTime<chrono::Utc>,
     command: &str,
 ) -> Result<CronJob> {
-    add_once_at_validated(config, at, command, false)
+    add_once_at_validated(config, at, command)
 }
 
 pub fn pause_job(config: &Config, id: &str) -> Result<CronJob> {
@@ -774,7 +772,9 @@ mod tests {
                 .contains("explicit approval")
         );
 
-        let approved = add_shell_job_with_approval(
+        // add_shell_job_with_approval no longer accepts an approved flag;
+        // medium-risk commands are always blocked at this layer.
+        let also_denied = add_shell_job_with_approval(
             &config,
             None,
             Schedule::Cron {
@@ -783,9 +783,8 @@ mod tests {
             },
             "touch cron-medium-risk",
             None,
-            true,
         );
-        assert!(approved.is_ok(), "{approved:?}");
+        assert!(also_denied.is_err());
     }
 
     #[test]
@@ -795,6 +794,8 @@ mod tests {
         config.autonomy.allowed_commands = vec!["echo".into(), "touch".into()];
         let job = make_job(&config, "*/5 * * * *", None, "echo original");
 
+        // update_shell_job_with_approval no longer accepts an approved flag;
+        // medium-risk commands are always blocked at this layer.
         let denied = update_shell_job_with_approval(
             &config,
             &job.id,
@@ -802,7 +803,6 @@ mod tests {
                 command: Some("touch cron-medium-risk-update".into()),
                 ..CronJobPatch::default()
             },
-            false,
         );
         assert!(denied.is_err());
         assert!(
@@ -811,18 +811,6 @@ mod tests {
                 .to_string()
                 .contains("explicit approval")
         );
-
-        let approved = update_shell_job_with_approval(
-            &config,
-            &job.id,
-            CronJobPatch {
-                command: Some("touch cron-medium-risk-update".into()),
-                ..CronJobPatch::default()
-            },
-            true,
-        )
-        .unwrap();
-        assert_eq!(approved.command, "touch cron-medium-risk-update");
     }
 
     #[test]
@@ -855,7 +843,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = test_config(&tmp);
 
-        let job = add_once_validated(&config, "1h", "echo one-shot", false).unwrap();
+        let job = add_once_validated(&config, "1h", "echo one-shot").unwrap();
         assert_eq!(job.command, "echo one-shot");
         assert!(matches!(job.schedule, Schedule::At { .. }));
     }
@@ -867,7 +855,7 @@ mod tests {
         config.autonomy.allowed_commands = vec!["echo".into()];
         config.autonomy.level = crate::security::AutonomyLevel::Supervised;
 
-        let result = add_once_validated(&config, "1h", "curl https://example.com", false);
+        let result = add_once_validated(&config, "1h", "curl https://example.com");
         assert!(result.is_err());
         assert!(
             result
@@ -883,7 +871,7 @@ mod tests {
         let config = test_config(&tmp);
         let at = chrono::Utc::now() + chrono::Duration::hours(1);
 
-        let job = add_once_at_validated(&config, at, "echo at-shot", false).unwrap();
+        let job = add_once_at_validated(&config, at, "echo at-shot").unwrap();
         assert_eq!(job.command, "echo at-shot");
         assert!(matches!(job.schedule, Schedule::At { .. }));
     }
@@ -895,7 +883,9 @@ mod tests {
         config.autonomy.allowed_commands = vec!["echo".into(), "touch".into()];
         let at = chrono::Utc::now() + chrono::Duration::hours(1);
 
-        let denied = add_once_at_validated(&config, at, "touch at-medium", false);
+        // add_once_at_validated no longer accepts an approved flag;
+        // medium-risk commands are always blocked at this layer.
+        let denied = add_once_at_validated(&config, at, "touch at-medium");
         assert!(denied.is_err());
         assert!(
             denied
@@ -903,9 +893,6 @@ mod tests {
                 .to_string()
                 .contains("explicit approval")
         );
-
-        let approved = add_once_at_validated(&config, at, "touch at-medium", true);
-        assert!(approved.is_ok(), "{approved:?}");
     }
 
     #[test]
@@ -915,7 +902,7 @@ mod tests {
         config.autonomy.allowed_commands = vec!["echo".into()];
         config.autonomy.level = crate::security::AutonomyLevel::Supervised;
 
-        // Simulate gateway API path: add_shell_job_with_approval(approved=false)
+        // Simulate gateway API path: add_shell_job_with_approval blocks disallowed commands
         let result = add_shell_job_with_approval(
             &config,
             None,
@@ -925,7 +912,6 @@ mod tests {
             },
             "curl https://example.com",
             None,
-            false,
         );
         assert!(result.is_err());
         assert!(
@@ -946,7 +932,7 @@ mod tests {
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
         // Simulate scheduler validation path
         let result =
-            validate_shell_command_with_security(&security, "curl https://example.com", false);
+            validate_shell_command_with_security(&security, "curl https://example.com");
         assert!(result.is_err());
         assert!(
             result
