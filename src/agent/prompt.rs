@@ -197,6 +197,7 @@ pub fn timestamp_prefix(message: &str, context: Option<&str>) -> String {
     }
 }
 
+#[derive(Clone)]
 pub struct PromptContext<'a> {
     pub workspace_dir: &'a Path,
     pub model_name: &'a str,

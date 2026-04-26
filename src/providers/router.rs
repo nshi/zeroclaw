@@ -323,6 +323,18 @@ impl Provider for RouterProvider {
             .any(|(_, provider)| provider.supports_vision())
     }
 
+    fn customize_prompt_builder(
+        &self,
+        builder: &mut crate::agent::prompt::SystemPromptBuilder,
+        ctx: &crate::agent::prompt::PromptContext<'_>,
+    ) {
+        let (provider_idx, resolved_model) = self.resolve(ctx.model_name);
+        let mut resolved_ctx = ctx.clone();
+        resolved_ctx.model_name = &resolved_model;
+        let (_, provider) = &self.providers[provider_idx];
+        provider.customize_prompt_builder(builder, &resolved_ctx);
+    }
+
     async fn warmup(&self) -> anyhow::Result<()> {
         for (name, provider) in &self.providers {
             tracing::info!(provider = name, "Warming up routed provider");
@@ -1197,5 +1209,90 @@ mod tests {
         assert_eq!(streaming.stream_calls.load(Ordering::SeqCst), 1);
         assert_eq!(streaming.tool_event_calls.load(Ordering::SeqCst), 1);
         assert_eq!(*streaming.last_stream_model.lock(), "claude-opus");
+    }
+
+    /// Mock that records the model name seen by `customize_prompt_builder`.
+    struct PromptCaptureMock {
+        seen_model: parking_lot::Mutex<Option<String>>,
+    }
+
+    impl PromptCaptureMock {
+        fn new() -> Self {
+            Self {
+                seen_model: parking_lot::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for PromptCaptureMock {
+        async fn chat_with_system(
+            &self,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+            _: f64,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        fn customize_prompt_builder(
+            &self,
+            _builder: &mut crate::agent::prompt::SystemPromptBuilder,
+            ctx: &crate::agent::prompt::PromptContext<'_>,
+        ) {
+            *self.seen_model.lock() = Some(ctx.model_name.to_string());
+        }
+    }
+
+    #[test]
+    fn customize_prompt_builder_delegates_with_resolved_model() {
+        use crate::agent::prompt::{SystemPromptBuilder, test_helpers::make_test_ctx};
+
+        let mock = Arc::new(PromptCaptureMock::new());
+        let providers: Vec<(String, Box<dyn Provider>)> =
+            vec![("ollama".into(), Box::new(Arc::clone(&mock)) as Box<dyn Provider>)];
+        let routes = vec![(
+            "gemma".to_string(),
+            Route {
+                provider_name: "ollama".to_string(),
+                model: "gemma4".to_string(),
+            },
+        )];
+        let router = RouterProvider::new(providers, routes, "default-model".to_string());
+
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let mut ctx = make_test_ctx(&tools);
+        ctx.model_name = "hint:gemma";
+
+        let mut builder = SystemPromptBuilder::with_defaults();
+        router.customize_prompt_builder(&mut builder, &ctx);
+
+        assert_eq!(
+            mock.seen_model.lock().as_deref(),
+            Some("gemma4"),
+            "Router should resolve hint to actual model name before delegating"
+        );
+    }
+
+    #[async_trait]
+    impl Provider for Arc<PromptCaptureMock> {
+        async fn chat_with_system(
+            &self,
+            s: Option<&str>,
+            m: &str,
+            model: &str,
+            t: f64,
+        ) -> anyhow::Result<String> {
+            self.as_ref().chat_with_system(s, m, model, t).await
+        }
+
+        fn customize_prompt_builder(
+            &self,
+            builder: &mut crate::agent::prompt::SystemPromptBuilder,
+            ctx: &crate::agent::prompt::PromptContext<'_>,
+        ) {
+            self.as_ref().customize_prompt_builder(builder, ctx);
+        }
     }
 }
