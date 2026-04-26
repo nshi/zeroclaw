@@ -211,6 +211,17 @@ pub trait Channel: Send + Sync {
     ) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Create a channel-specific approval adapter for interactive approval prompting.
+    ///
+    /// The `msg` provides context for the adapter (chat_id, thread_ts, etc.).
+    /// Returns `None` if this channel does not support interactive approval.
+    fn create_approval_adapter(
+        &self,
+        _msg: &ChannelMessage,
+    ) -> Option<Box<dyn crate::approval::ChannelApprovalAdapter>> {
+        None
+    }
 }
 
 #[cfg(test)]
