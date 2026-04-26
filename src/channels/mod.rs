@@ -2857,6 +2857,7 @@ async fn process_channel_message(
                         route.temperature.unwrap_or(runtime_defaults.temperature),
                         true,
                         Some(&*ctx.approval_manager),
+                        None, // approval_adapter: channels will get adapters in Phase 4
                         msg.channel.as_str(),
                         Some(msg.reply_target.as_str()),
                         &ctx.multimodal,

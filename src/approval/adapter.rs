@@ -65,6 +65,62 @@ pub trait ChannelApprovalAdapter: Send + Sync {
     fn channel_name(&self) -> &str;
 }
 
+// ── CLI Adapter ─────────────────────────────────────────────────────
+
+/// Approval adapter for CLI (stdin/stderr) interaction.
+///
+/// Prompts the user on stderr and reads their response from stdin via
+/// `spawn_blocking` to avoid blocking the tokio executor.
+pub struct CliApprovalAdapter;
+
+#[async_trait]
+impl ChannelApprovalAdapter for CliApprovalAdapter {
+    async fn send_approval_request(
+        &self,
+        request: &ApprovalRequest,
+    ) -> Result<PendingApproval> {
+        let summary = super::summarize_args(&request.arguments);
+        let tool_name = request.tool_name.clone();
+        let risk = request.risk_level;
+
+        // Write the prompt to stderr (non-blocking for the runtime).
+        eprintln!();
+        eprintln!("🔧 Agent wants to execute: {tool_name}");
+        eprintln!("   {summary}");
+        if let Some(ref r) = risk {
+            eprintln!("   Risk: {r:?}");
+        }
+        eprint!("   [Y]es / [N]o / [A]lways for {tool_name}: ");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+
+        Ok(PendingApproval {
+            request_id: request.request_id.clone(),
+            platform_ref: PlatformRef::Cli,
+        })
+    }
+
+    async fn receive_approval_response(
+        &self,
+        _pending: &PendingApproval,
+    ) -> Result<ApprovalResponse> {
+        // stdin is blocking I/O — must not block the tokio executor.
+        let line = tokio::task::spawn_blocking(|| {
+            let stdin = std::io::stdin();
+            let mut buf = String::new();
+            std::io::BufRead::read_line(&mut stdin.lock(), &mut buf)?;
+            Ok::<_, std::io::Error>(buf)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking failed: {e}"))??;
+
+        Ok(super::parse_approval_input(&line))
+    }
+
+    fn channel_name(&self) -> &str {
+        "cli"
+    }
+}
+
 // ── Test fixtures ───────────────────────────────────────────────────
 
 #[cfg(test)]

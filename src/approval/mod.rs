@@ -7,7 +7,7 @@
 
 pub mod adapter;
 
-pub use adapter::{ChannelApprovalAdapter, PendingApproval, PlatformRef};
+pub use adapter::{ChannelApprovalAdapter, CliApprovalAdapter, PendingApproval, PlatformRef};
 
 use crate::config::AutonomyConfig;
 use crate::security::{AutonomyLevel, CommandRiskLevel, SecurityPolicy};
