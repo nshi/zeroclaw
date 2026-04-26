@@ -3156,8 +3156,17 @@ pub(crate) async fn run_tool_call_loop(
                         mgr.record_decision(&tool_name, &tool_args, decision, channel_name);
                     }
 
-                    if decision == ApprovalResponse::No {
-                        let denied = "Denied by user.".to_string();
+                    if decision == ApprovalResponse::No
+                        || decision == ApprovalResponse::Timeout
+                    {
+                        let denied = if decision == ApprovalResponse::Timeout {
+                            format!(
+                                "Approval timed out after {}s.",
+                                mgr.approval_timeout().as_secs()
+                            )
+                        } else {
+                            "Denied by user.".to_string()
+                        };
                         runtime_trace::record_event(
                             "tool_call_result",
                             Some(channel_name),
