@@ -1250,8 +1250,10 @@ mod tests {
         use crate::agent::prompt::{SystemPromptBuilder, test_helpers::make_test_ctx};
 
         let mock = Arc::new(PromptCaptureMock::new());
-        let providers: Vec<(String, Box<dyn Provider>)> =
-            vec![("ollama".into(), Box::new(Arc::clone(&mock)) as Box<dyn Provider>)];
+        let providers: Vec<(String, Box<dyn Provider>)> = vec![(
+            "ollama".into(),
+            Box::new(Arc::clone(&mock)) as Box<dyn Provider>,
+        )];
         let routes = vec![(
             "gemma".to_string(),
             Route {
