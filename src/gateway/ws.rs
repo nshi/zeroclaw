@@ -583,7 +583,10 @@ impl GatewayApprovalAdapter {
 
 #[async_trait]
 impl ChannelApprovalAdapter for GatewayApprovalAdapter {
-    async fn send_approval_request(&self, request: &ApprovalRequest) -> anyhow::Result<PendingApproval> {
+    async fn send_approval_request(
+        &self,
+        request: &ApprovalRequest,
+    ) -> anyhow::Result<PendingApproval> {
         let request_id = request.request_id.clone();
 
         // Build the approval_request frame.
@@ -616,7 +619,9 @@ impl ChannelApprovalAdapter for GatewayApprovalAdapter {
 
         Ok(PendingApproval {
             request_id: request_id.clone(),
-            platform_ref: PlatformRef::Gateway { connection_id: request_id },
+            platform_ref: PlatformRef::Gateway {
+                connection_id: request_id,
+            },
         })
     }
 
@@ -626,7 +631,8 @@ impl ChannelApprovalAdapter for GatewayApprovalAdapter {
     ) -> anyhow::Result<ApprovalResponse> {
         let rx = {
             let mut slot = self.response_rx.lock().await;
-            slot.take().ok_or_else(|| anyhow::anyhow!("no pending approval receiver"))?
+            slot.take()
+                .ok_or_else(|| anyhow::anyhow!("no pending approval receiver"))?
         };
 
         rx.await

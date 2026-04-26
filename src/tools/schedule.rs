@@ -78,9 +78,7 @@ impl Tool for ScheduleTool {
                 let id = require_str!(args, "id");
                 self.handle_get(id)
             }
-            "create" | "add" | "once" => {
-                self.handle_create_like(action, &args)
-            }
+            "create" | "add" | "once" => self.handle_create_like(action, &args),
             "cancel" | "remove" => {
                 if let Some(blocked) = self.enforce_mutation_allowed(action) {
                     return Ok(blocked);
@@ -198,11 +196,7 @@ impl ScheduleTool {
         }
     }
 
-    fn handle_create_like(
-        &self,
-        action: &str,
-        args: &serde_json::Value,
-    ) -> Result<ToolResult> {
+    fn handle_create_like(&self, action: &str, args: &serde_json::Value) -> Result<ToolResult> {
         let command = require_str!(args, "command");
         if command.trim().is_empty() {
             return ToolResult::err("Missing required parameter 'command'");
@@ -325,8 +319,7 @@ impl ScheduleTool {
             .map_err(|error| anyhow::anyhow!("Invalid run_at timestamp: {error}"))?
             .with_timezone(&Utc);
 
-        let job = match cron::add_once_at_validated(&self.config, run_at_parsed, command)
-        {
+        let job = match cron::add_once_at_validated(&self.config, run_at_parsed, command) {
             Ok(job) => job,
             Err(error) => {
                 return Ok(ToolResult {

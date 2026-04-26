@@ -12,9 +12,17 @@ use super::{ApprovalRequest, ApprovalResponse};
 #[derive(Debug, Clone)]
 pub enum PlatformRef {
     Cli,
-    Telegram { chat_id: i64, message_id: i32 },
-    Slack { channel_id: String, thread_ts: String },
-    Gateway { connection_id: String },
+    Telegram {
+        chat_id: i64,
+        message_id: i32,
+    },
+    Slack {
+        channel_id: String,
+        thread_ts: String,
+    },
+    Gateway {
+        connection_id: String,
+    },
 }
 
 /// A pending approval request awaiting a user response.
@@ -42,10 +50,7 @@ pub trait ChannelApprovalAdapter: Send + Sync {
     /// # Errors
     /// Returns an error if the prompt could not be delivered. The caller
     /// should treat delivery failures as a denial.
-    async fn send_approval_request(
-        &self,
-        request: &ApprovalRequest,
-    ) -> Result<PendingApproval>;
+    async fn send_approval_request(&self, request: &ApprovalRequest) -> Result<PendingApproval>;
 
     /// Wait for the user's response to a previously sent approval request.
     ///
@@ -75,10 +80,7 @@ pub struct CliApprovalAdapter;
 
 #[async_trait]
 impl ChannelApprovalAdapter for CliApprovalAdapter {
-    async fn send_approval_request(
-        &self,
-        request: &ApprovalRequest,
-    ) -> Result<PendingApproval> {
+    async fn send_approval_request(&self, request: &ApprovalRequest) -> Result<PendingApproval> {
         let summary = super::summarize_args(&request.arguments);
         let tool_name = request.tool_name.clone();
         let risk = request.risk_level;
@@ -157,17 +159,15 @@ impl TelegramApprovalAdapter {
 
 #[async_trait]
 impl ChannelApprovalAdapter for TelegramApprovalAdapter {
-    async fn send_approval_request(
-        &self,
-        request: &ApprovalRequest,
-    ) -> Result<PendingApproval> {
+    async fn send_approval_request(&self, request: &ApprovalRequest) -> Result<PendingApproval> {
         let summary = super::summarize_args(&request.arguments);
         let mut text = format!(
             "🔧 Approval needed\n\nTool: {}\nArgs: {}",
             request.tool_name, summary
         );
         if let Some(ref risk) = request.risk_level {
-            text.push_str(&format!("\nRisk: {risk:?}"));
+            use std::fmt::Write;
+            let _ = write!(text, "\nRisk: {risk:?}");
         }
         text.push_str("\n\nReply to this message with:\n• y — approve once\n• n — deny\n• a — always approve this tool");
 
@@ -180,15 +180,18 @@ impl ChannelApprovalAdapter for TelegramApprovalAdapter {
             body["message_thread_id"] = serde_json::Value::String(tid.clone());
         }
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.api_url("sendMessage"))
             .json(&body)
             .send()
             .await?;
         let json: serde_json::Value = resp.json().await?;
-        let message_id = json["result"]["message_id"]
+        let message_id_raw = json["result"]["message_id"]
             .as_i64()
-            .ok_or_else(|| anyhow::anyhow!("missing message_id in sendMessage response"))? as i32;
+            .ok_or_else(|| anyhow::anyhow!("missing message_id in sendMessage response"))?;
+        let message_id = i32::try_from(message_id_raw)
+            .map_err(|_| anyhow::anyhow!("message_id {message_id_raw} exceeds i32 range"))?;
 
         let chat_id = json["result"]["chat"]["id"]
             .as_i64()
@@ -196,7 +199,10 @@ impl ChannelApprovalAdapter for TelegramApprovalAdapter {
 
         Ok(PendingApproval {
             request_id: request.request_id.clone(),
-            platform_ref: PlatformRef::Telegram { chat_id, message_id },
+            platform_ref: PlatformRef::Telegram {
+                chat_id,
+                message_id,
+            },
         })
     }
 
@@ -205,13 +211,17 @@ impl ChannelApprovalAdapter for TelegramApprovalAdapter {
         pending: &PendingApproval,
     ) -> Result<ApprovalResponse> {
         let (expected_chat_id, expected_msg_id) = match &pending.platform_ref {
-            PlatformRef::Telegram { chat_id, message_id } => (*chat_id, *message_id),
+            PlatformRef::Telegram {
+                chat_id,
+                message_id,
+            } => (*chat_id, *message_id),
             _ => anyhow::bail!("TelegramApprovalAdapter got non-Telegram PlatformRef"),
         };
 
         let mut offset: i64 = 0;
         loop {
-            let resp = self.client
+            let resp = self
+                .client
                 .post(self.api_url("getUpdates"))
                 .json(&serde_json::json!({
                     "offset": offset,
@@ -229,10 +239,10 @@ impl ChannelApprovalAdapter for TelegramApprovalAdapter {
                     }
                     let msg = &update["message"];
                     let reply_to = &msg["reply_to_message"];
-                    let reply_msg_id = reply_to["message_id"].as_i64().unwrap_or(-1) as i32;
+                    let reply_msg_id = reply_to["message_id"].as_i64().unwrap_or(-1);
                     let chat_id = msg["chat"]["id"].as_i64().unwrap_or(0);
 
-                    if reply_msg_id == expected_msg_id && chat_id == expected_chat_id {
+                    if reply_msg_id == i64::from(expected_msg_id) && chat_id == expected_chat_id {
                         let text = msg["text"].as_str().unwrap_or("");
                         return Ok(super::parse_approval_input(text));
                     }
@@ -273,17 +283,15 @@ impl SlackApprovalAdapter {
 
 #[async_trait]
 impl ChannelApprovalAdapter for SlackApprovalAdapter {
-    async fn send_approval_request(
-        &self,
-        request: &ApprovalRequest,
-    ) -> Result<PendingApproval> {
+    async fn send_approval_request(&self, request: &ApprovalRequest) -> Result<PendingApproval> {
         let summary = super::summarize_args(&request.arguments);
         let mut text = format!(
             "🔧 Approval needed\n\nTool: {}\nArgs: {}",
             request.tool_name, summary
         );
         if let Some(ref risk) = request.risk_level {
-            text.push_str(&format!("\nRisk: {risk:?}"));
+            use std::fmt::Write;
+            let _ = write!(text, "\nRisk: {risk:?}");
         }
         text.push_str("\n\nReply in this thread with:\n• y — approve once\n• n — deny\n• a — always approve this tool");
 
@@ -324,7 +332,10 @@ impl ChannelApprovalAdapter for SlackApprovalAdapter {
         pending: &PendingApproval,
     ) -> Result<ApprovalResponse> {
         let (channel_id, thread_ts) = match &pending.platform_ref {
-            PlatformRef::Slack { channel_id, thread_ts } => (channel_id.clone(), thread_ts.clone()),
+            PlatformRef::Slack {
+                channel_id,
+                thread_ts,
+            } => (channel_id.clone(), thread_ts.clone()),
             _ => anyhow::bail!("SlackApprovalAdapter got non-Slack PlatformRef"),
         };
 
@@ -381,10 +392,7 @@ impl GatewayApprovalAdapter {
         frame_tx: tokio::sync::mpsc::Sender<String>,
         pending_responses: std::sync::Arc<
             tokio::sync::Mutex<
-                std::collections::HashMap<
-                    String,
-                    tokio::sync::oneshot::Sender<ApprovalResponse>,
-                >,
+                std::collections::HashMap<String, tokio::sync::oneshot::Sender<ApprovalResponse>>,
             >,
         >,
     ) -> Self {
@@ -402,10 +410,7 @@ impl GatewayApprovalAdapter {
     pub async fn resolve_approval_response(
         pending: &std::sync::Arc<
             tokio::sync::Mutex<
-                std::collections::HashMap<
-                    String,
-                    tokio::sync::oneshot::Sender<ApprovalResponse>,
-                >,
+                std::collections::HashMap<String, tokio::sync::oneshot::Sender<ApprovalResponse>>,
             >,
         >,
         request_id: &str,
@@ -423,10 +428,7 @@ impl GatewayApprovalAdapter {
 
 #[async_trait]
 impl ChannelApprovalAdapter for GatewayApprovalAdapter {
-    async fn send_approval_request(
-        &self,
-        request: &ApprovalRequest,
-    ) -> Result<PendingApproval> {
+    async fn send_approval_request(&self, request: &ApprovalRequest) -> Result<PendingApproval> {
         let frame = serde_json::json!({
             "type": "approval_request",
             "request_id": request.request_id,
@@ -459,7 +461,11 @@ impl ChannelApprovalAdapter for GatewayApprovalAdapter {
         &self,
         _pending: &PendingApproval,
     ) -> Result<ApprovalResponse> {
-        let rx = self.response_rx.lock().await.take()
+        let rx = self
+            .response_rx
+            .lock()
+            .await
+            .take()
             .ok_or_else(|| anyhow::anyhow!("no pending approval response receiver"))?;
         rx.await
             .map_err(|_| anyhow::anyhow!("approval response channel closed"))
@@ -572,10 +578,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn mock_adapter_send_receive_lifecycle() {
         let adapter = MockApprovalAdapter::new(ApprovalResponse::Always);
-        let request = ApprovalRequest::new(
-            "file_write".into(),
-            serde_json::json!({"path": "test.txt"}),
-        );
+        let request =
+            ApprovalRequest::new("file_write".into(), serde_json::json!({"path": "test.txt"}));
 
         let pending = adapter.send_approval_request(&request).await.unwrap();
         assert_eq!(pending.request_id, request.request_id);
@@ -587,10 +591,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn failing_adapter_returns_error() {
         let adapter = FailingApprovalAdapter;
-        let request = ApprovalRequest::new(
-            "file_write".into(),
-            serde_json::json!({}),
-        );
+        let request = ApprovalRequest::new("file_write".into(), serde_json::json!({}));
 
         let result = adapter.send_approval_request(&request).await;
         assert!(result.is_err());

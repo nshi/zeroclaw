@@ -170,13 +170,7 @@ impl Tool for CronAddTool {
                     return Ok(blocked);
                 }
 
-                cron::add_shell_job_with_approval(
-                    &self.config,
-                    name,
-                    schedule,
-                    command,
-                    delivery,
-                )
+                cron::add_shell_job_with_approval(&self.config, name, schedule, command, delivery)
             }
             JobType::Agent => {
                 let prompt = match args.get("prompt").and_then(serde_json::Value::as_str) {

@@ -8,9 +8,10 @@
 pub mod adapter;
 
 pub use adapter::{
-    ChannelApprovalAdapter, CliApprovalAdapter, GatewayApprovalAdapter, PendingApproval,
-    PlatformRef, SlackApprovalAdapter, TelegramApprovalAdapter,
+    ChannelApprovalAdapter, CliApprovalAdapter, SlackApprovalAdapter, TelegramApprovalAdapter,
 };
+// GatewayApprovalAdapter is constructed directly from the gateway/ws.rs module
+// via crate::approval::adapter::GatewayApprovalAdapter when needed.
 
 use crate::config::AutonomyConfig;
 use crate::security::{AutonomyLevel, CommandRiskLevel, SecurityPolicy};
@@ -276,13 +277,17 @@ impl ApprovalManager {
             }
         };
 
+        #[allow(clippy::cast_possible_truncation)]
         let elapsed_ms = start.elapsed().as_millis() as u64;
         self.record_decision_ext(
             &request.tool_name,
             &request.arguments,
             response,
             adapter.channel_name(),
-            request.risk_level.as_ref().map(|r| format!("{r:?}").to_ascii_lowercase()),
+            request
+                .risk_level
+                .as_ref()
+                .map(|r| format!("{r:?}").to_ascii_lowercase()),
             Some(request.request_id.clone()),
             Some(elapsed_ms),
         );
@@ -675,10 +680,7 @@ mod tests {
 
     #[test]
     fn approval_request_serde() {
-        let req = ApprovalRequest::new(
-            "shell".into(),
-            serde_json::json!({"command": "echo hi"}),
-        );
+        let req = ApprovalRequest::new("shell".into(), serde_json::json!({"command": "echo hi"}));
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ApprovalRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tool_name, "shell");
@@ -854,10 +856,8 @@ mod tests {
         let mgr = ApprovalManager::from_config(&config);
         let adapter = MockApprovalAdapter::new(ApprovalResponse::Yes);
 
-        let request = ApprovalRequest::new(
-            "file_write".into(),
-            serde_json::json!({"path": "test.txt"}),
-        );
+        let request =
+            ApprovalRequest::new("file_write".into(), serde_json::json!({"path": "test.txt"}));
 
         let result = mgr.request_approval(&adapter, &request).await;
         assert_eq!(result, ApprovalResponse::Yes);
@@ -876,10 +876,8 @@ mod tests {
         let mgr = ApprovalManager::from_config(&config);
         let adapter = MockApprovalAdapter::new(ApprovalResponse::Always);
 
-        let request = ApprovalRequest::new(
-            "file_write".into(),
-            serde_json::json!({"path": "test.txt"}),
-        );
+        let request =
+            ApprovalRequest::new("file_write".into(), serde_json::json!({"path": "test.txt"}));
 
         let result = mgr.request_approval(&adapter, &request).await;
         assert_eq!(result, ApprovalResponse::Always);
@@ -894,10 +892,7 @@ mod tests {
         let mgr = ApprovalManager::from_config(&config);
         let adapter = MockApprovalAdapter::new(ApprovalResponse::Always);
 
-        let request = ApprovalRequest::new(
-            "shell".into(),
-            serde_json::json!({"command": "ls"}),
-        );
+        let request = ApprovalRequest::new("shell".into(), serde_json::json!({"command": "ls"}));
 
         let result = mgr.request_approval(&adapter, &request).await;
         assert_eq!(result, ApprovalResponse::Always);
@@ -916,10 +911,8 @@ mod tests {
         let mgr = ApprovalManager::from_config(&config);
         let adapter = HangingApprovalAdapter;
 
-        let request = ApprovalRequest::new(
-            "file_write".into(),
-            serde_json::json!({"path": "test.txt"}),
-        );
+        let request =
+            ApprovalRequest::new("file_write".into(), serde_json::json!({"path": "test.txt"}));
 
         let result = mgr.request_approval(&adapter, &request).await;
         assert_eq!(result, ApprovalResponse::Timeout);
@@ -937,10 +930,8 @@ mod tests {
         let mgr = ApprovalManager::from_config(&config);
         let adapter = MockApprovalAdapter::new(ApprovalResponse::No);
 
-        let request = ApprovalRequest::new(
-            "file_write".into(),
-            serde_json::json!({"path": "test.txt"}),
-        );
+        let request =
+            ApprovalRequest::new("file_write".into(), serde_json::json!({"path": "test.txt"}));
 
         let result = mgr.request_approval(&adapter, &request).await;
         assert_eq!(result, ApprovalResponse::No);

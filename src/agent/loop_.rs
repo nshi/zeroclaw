@@ -3134,10 +3134,7 @@ pub(crate) async fn run_tool_call_loop(
             // ── Approval hook ────────────────────────────────
             if let Some(mgr) = approval {
                 if mgr.needs_approval(&tool_name) {
-                    let mut request = ApprovalRequest::new(
-                        tool_name.clone(),
-                        tool_args.clone(),
-                    );
+                    let mut request = ApprovalRequest::new(tool_name.clone(), tool_args.clone());
                     request.channel = channel_name.to_string();
 
                     // Route through adapter when available; otherwise fall
@@ -3156,9 +3153,7 @@ pub(crate) async fn run_tool_call_loop(
                         mgr.record_decision(&tool_name, &tool_args, decision, channel_name);
                     }
 
-                    if decision == ApprovalResponse::No
-                        || decision == ApprovalResponse::Timeout
-                    {
+                    if decision == ApprovalResponse::No || decision == ApprovalResponse::Timeout {
                         let denied = if decision == ApprovalResponse::Timeout {
                             format!(
                                 "Approval timed out after {}s.",

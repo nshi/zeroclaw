@@ -112,11 +112,7 @@ pub fn update_shell_job_with_approval(
 }
 
 /// Create a one-shot validated shell job from a delay string (e.g. "30m").
-pub fn add_once_validated(
-    config: &Config,
-    delay: &str,
-    command: &str,
-) -> Result<CronJob> {
+pub fn add_once_validated(config: &Config, delay: &str, command: &str) -> Result<CronJob> {
     let duration = parse_delay(delay)?;
     let at = chrono::Utc::now() + duration;
     add_once_at_validated(config, at, command)
@@ -931,8 +927,7 @@ mod tests {
 
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
         // Simulate scheduler validation path
-        let result =
-            validate_shell_command_with_security(&security, "curl https://example.com");
+        let result = validate_shell_command_with_security(&security, "curl https://example.com");
         assert!(result.is_err());
         assert!(
             result
