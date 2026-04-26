@@ -528,9 +528,7 @@ async fn run_job_command_with_timeout(
     // Jobs created via the validated helpers were already checked at creation
     // time, but we re-validate at execution time to catch policy changes and
     // manually-edited job stores.
-    if let Err(error) =
-        crate::cron::validate_shell_command_with_security(security, &job.command)
-    {
+    if let Err(error) = crate::cron::validate_shell_command_with_security(security, &job.command) {
         return (false, error.to_string());
     }
 

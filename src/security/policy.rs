@@ -1778,8 +1778,7 @@ mod tests {
             ..SecurityPolicy::default()
         };
 
-        let result =
-            p.validate_command_execution("wget https://releases.example.com/v1.tar.gz");
+        let result = p.validate_command_execution("wget https://releases.example.com/v1.tar.gz");
         assert_eq!(result.unwrap(), (CommandRiskLevel::High, false));
     }
 
@@ -3174,15 +3173,9 @@ mod tests {
             workspace_only: false,
             ..SecurityPolicy::default()
         };
-        assert!(
-            p.validate_command_execution("rm -rf /tmp/test")
-                .is_ok()
-        );
+        assert!(p.validate_command_execution("rm -rf /tmp/test").is_ok());
         assert!(p.validate_command_execution("nohup firefox").is_ok());
-        assert!(
-            p.validate_command_execution("ls /usr/bin/firefox")
-                .is_ok()
-        );
+        assert!(p.validate_command_execution("ls /usr/bin/firefox").is_ok());
     }
 
     #[test]
