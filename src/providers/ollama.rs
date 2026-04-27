@@ -17,6 +17,7 @@ pub struct OllamaProvider {
     timeout_secs: Option<u64>,
     max_tokens: Option<u32>,
     num_ctx: Option<u32>,
+    native_tool_calling: Option<bool>,
 }
 
 impl OllamaProvider {
@@ -27,6 +28,7 @@ impl OllamaProvider {
             timeout_secs: None,
             max_tokens: None,
             num_ctx: None,
+            native_tool_calling: None,
         }
     }
 
@@ -52,6 +54,11 @@ impl OllamaProvider {
 
     pub fn with_context_window(mut self, context_window: Option<u32>) -> Self {
         self.num_ctx = context_window;
+        self
+    }
+
+    pub fn with_native_tool_calling(mut self, native: Option<bool>) -> Self {
+        self.native_tool_calling = native;
         self
     }
 
@@ -460,19 +467,7 @@ fn try_parse_tool_result_json(content: &str) -> Option<OllamaMessage> {
 // ── Tool conversion ─────────────────────────────────────────────────────────
 
 fn convert_tool_specs(tools: &[ToolSpec]) -> Vec<serde_json::Value> {
-    tools
-        .iter()
-        .map(|t| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                }
-            })
-        })
-        .collect()
+    super::traits::tool_specs_to_openai_json(tools)
 }
 
 // ── Tool call parsing ───────────────────────────────────────────────────────
@@ -570,8 +565,9 @@ impl Provider for OllamaProvider {
             // Default to prompt-guided tool calling (XML instructions in system
             // prompt) because many Ollama-served models silently ignore the
             // native /api/chat tools array and need explicit text instructions.
-            // See: https://github.com/zeroclaw-labs/zeroclaw/issues/3999
-            native_tool_calling: false,
+            // The `native_tool_calling` field can be overridden via the
+            // `tool_dispatcher` config ("native" / "xml" / "auto").
+            native_tool_calling: self.native_tool_calling.unwrap_or(false),
             vision: true,
             prompt_caching: false,
         }
@@ -730,13 +726,11 @@ impl Provider for OllamaProvider {
     }
 
     fn supports_streaming_tool_events(&self) -> bool {
-        // With native_tool_calling disabled, tools are injected into the
-        // system prompt as text. Streaming works fine for that path since
-        // tools aren't in the API request — but the agent loop uses this
-        // flag to decide whether to stream when tool specs are present.
-        // Return false so the non-streaming chat() path handles prompt-guided
-        // tool injection via the trait default.
-        false
+        // When native tool calling is enabled, stream_chat() passes tools
+        // to the Ollama API and emits ToolCall events from the response.
+        // When disabled, the non-streaming chat() trait default handles
+        // prompt-guided tool injection.
+        self.native_tool_calling.unwrap_or(false)
     }
 
     fn stream_chat(
@@ -1459,12 +1453,31 @@ mod tests {
     }
 
     #[test]
+    fn provider_capabilities_native_override() {
+        let provider = OllamaProvider::new().with_native_tool_calling(Some(true));
+        let caps = provider.capabilities();
+        assert!(
+            caps.native_tool_calling,
+            "native_tool_calling override should enable native tools"
+        );
+    }
+
+    #[test]
     fn provider_supports_streaming() {
         let provider = OllamaProvider::new();
         assert!(provider.supports_streaming());
         assert!(
             !provider.supports_streaming_tool_events(),
             "Ollama should not stream tool events (prompt-guided mode)"
+        );
+    }
+
+    #[test]
+    fn provider_streaming_tool_events_with_native_override() {
+        let provider = OllamaProvider::new().with_native_tool_calling(Some(true));
+        assert!(
+            provider.supports_streaming_tool_events(),
+            "native tool calling should enable streaming tool events"
         );
     }
 
@@ -1595,6 +1608,7 @@ mod tests {
             timeout_secs: None,
             max_tokens: None,
             num_ctx: None,
+            native_tool_calling: None,
         };
 
         let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
@@ -1620,6 +1634,7 @@ mod tests {
             timeout_secs: None,
             max_tokens: None,
             num_ctx: None,
+            native_tool_calling: None,
         };
 
         let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];

@@ -66,6 +66,10 @@ pub struct ProviderRuntimeOptions {
     /// Context window size override.
     /// Sourced from `[model_providers.<name>].context_window`.
     pub provider_context_window: Option<u32>,
+    /// Override for native tool calling, derived from `tool_dispatcher` config.
+    /// `Some(true)` forces native, `Some(false)` forces prompt-guided, `None`
+    /// defers to the provider's default.
+    pub native_tool_calling_override: Option<bool>,
 }
 
 impl Default for ProviderRuntimeOptions {
@@ -83,6 +87,7 @@ impl Default for ProviderRuntimeOptions {
             provider_max_tokens: None,
             model_provider_base_urls: std::collections::HashMap::new(),
             provider_context_window: None,
+            native_tool_calling_override: None,
         }
     }
 }
@@ -115,6 +120,11 @@ pub fn provider_runtime_options_from_config(
             .model_providers
             .get("ollama")
             .and_then(|p| p.context_window),
+        native_tool_calling_override: match config.agent.tool_dispatcher.as_str() {
+            crate::config::schema::TOOL_DISPATCHER_NATIVE => Some(true),
+            crate::config::schema::TOOL_DISPATCHER_XML => Some(false),
+            _ => None,
+        },
     }
 }
 
@@ -418,7 +428,8 @@ fn create_provider_with_url_and_options(
                 .with_base_url(&resolved_url)
                 .with_timeout_secs(options.provider_timeout_secs)
                 .with_reasoning(options.reasoning_enabled)
-                .with_context_window(options.provider_context_window);
+                .with_context_window(options.provider_context_window)
+                .with_native_tool_calling(options.native_tool_calling_override);
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_tokens(Some(mt));
             }

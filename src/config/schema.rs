@@ -1300,8 +1300,13 @@ fn default_agent_max_context_tokens() -> usize {
     32_000
 }
 
+/// Tool dispatcher config values used by `AgentConfig::tool_dispatcher`.
+pub const TOOL_DISPATCHER_NATIVE: &str = "native";
+pub const TOOL_DISPATCHER_XML: &str = "xml";
+pub const TOOL_DISPATCHER_AUTO: &str = "auto";
+
 fn default_agent_tool_dispatcher() -> String {
-    "auto".into()
+    TOOL_DISPATCHER_AUTO.into()
 }
 
 fn default_max_system_prompt_chars() -> usize {

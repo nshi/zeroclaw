@@ -405,10 +405,21 @@ pub trait Provider: Send + Sync {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
-        // If tools are provided but provider doesn't support native tools,
-        // inject tool instructions into system prompt as fallback.
         if let Some(tools) = request.tools {
-            if !tools.is_empty() && !self.supports_native_tools() {
+            if !tools.is_empty() {
+                if self.supports_native_tools() {
+                    // Convert to OpenAI-style function calling format and
+                    // delegate to chat_with_tools(). Providers that use a
+                    // different tool format (e.g. Anthropic, Gemini) must
+                    // override chat() rather than relying on this default.
+                    let api_tools = tool_specs_to_openai_json(tools);
+                    return self
+                        .chat_with_tools(request.messages, &api_tools, model, temperature)
+                        .await;
+                }
+
+                // Provider doesn't support native tools — inject tool
+                // instructions into the system prompt as fallback.
                 let tool_instructions = match self.convert_tools(tools) {
                     ToolsPayload::PromptGuided { instructions } => instructions,
                     payload => {
@@ -570,6 +581,26 @@ pub trait Provider: Send + Sync {
             .map(|chunk_result| chunk_result.map(StreamEvent::from_chunk))
             .boxed()
     }
+}
+
+/// Convert tool specs to OpenAI-style function calling JSON.
+///
+/// Produces the `{"type":"function","function":{...}}` format used by
+/// OpenAI, Ollama, and OpenRouter APIs.
+pub fn tool_specs_to_openai_json(tools: &[ToolSpec]) -> Vec<serde_json::Value> {
+    tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                }
+            })
+        })
+        .collect()
 }
 
 /// Build tool instructions text for prompt-guided tool calling.
