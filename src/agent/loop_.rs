@@ -3160,7 +3160,7 @@ pub(crate) async fn run_tool_call_loop(
                                 mgr.approval_timeout().as_secs()
                             )
                         } else {
-                            "Denied by user.".to_string()
+                            "ERROR: Permission for this tool call was denied. The tool call was rejected by the user. The operation was NOT performed.".to_string()
                         };
                         runtime_trace::record_event(
                             "tool_call_result",
@@ -6652,7 +6652,7 @@ mod tests {
             .find(|msg| msg.role == "user" && msg.content.starts_with("[Tool results]"))
             .expect("tool results message should be present");
         assert!(tool_results.content.contains("hello"));
-        assert!(!tool_results.content.contains("Denied by user."));
+        assert!(!tool_results.content.contains("The operation was NOT performed."));
     }
 
     #[tokio::test]
