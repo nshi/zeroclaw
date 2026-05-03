@@ -6,6 +6,9 @@
 //! Supports optional blocking mode to wait for a human response.
 
 use super::traits::{Tool, ToolResult};
+use crate::agent::pending_response::{
+    MessageContext, current_message_context, register_waiter, scope_key_for_context,
+};
 use crate::channels::traits::{Channel, ChannelMessage, SendMessage};
 use crate::require_str;
 use crate::security::SecurityPolicy;
@@ -288,9 +291,49 @@ impl Tool for EscalateToHumanTool {
             (name.clone(), ch.clone())
         };
 
+        let dispatch_ctx: Option<MessageContext> = current_message_context();
+        let reply_target = dispatch_ctx
+            .as_ref()
+            .map(|c| c.reply_target.clone())
+            .unwrap_or_default();
+
+        // Register the waiter BEFORE sending so a fast reply cannot race
+        // ahead of registration. Required for Slack DMs where the user's
+        // response shares the in-flight task's scope and would otherwise be
+        // routed back into a fresh dispatch.
+        let mut response_state: Option<(
+            tokio::sync::mpsc::Receiver<ChannelMessage>,
+            Option<crate::agent::pending_response::WaiterGuard>,
+            Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+        )> = None;
+        if wait_for_response {
+            let (tx, rx) = tokio::sync::mpsc::channel::<ChannelMessage>(1);
+            let guard = dispatch_ctx
+                .as_ref()
+                .map(|ctx| register_waiter(scope_key_for_context(ctx), tx.clone()));
+            let listen_handle = if dispatch_ctx.is_none() {
+                let listen_channel = Arc::clone(&channel);
+                let listen_tx = tx.clone();
+                Some(tokio::spawn(async move {
+                    listen_channel.listen(listen_tx).await
+                }))
+            } else {
+                None
+            };
+            drop(tx);
+            response_state = Some((rx, guard, listen_handle));
+        }
+
         // Send the escalation message
-        let msg = SendMessage::new(&text, "");
+        let msg = SendMessage::new(&text, &reply_target)
+            .in_thread(dispatch_ctx.as_ref().and_then(|c| c.thread_ts.clone()));
         if let Err(e) = channel.send(&msg).await {
+            if let Some((_rx, guard, listen_handle)) = response_state {
+                if let Some(handle) = listen_handle {
+                    handle.abort();
+                }
+                drop(guard);
+            }
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -305,16 +348,14 @@ impl Tool for EscalateToHumanTool {
             self.send_pushover(urgency, &summary).await;
         }
 
-        if wait_for_response {
-            // Block and wait for human response (same pattern as ask_user)
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMessage>(1);
+        if let Some((mut rx, guard, listen_handle)) = response_state {
             let timeout = std::time::Duration::from_secs(timeout_secs);
-
-            let listen_channel = Arc::clone(&channel);
-            let listen_handle = tokio::spawn(async move { listen_channel.listen(tx).await });
-
             let response = tokio::time::timeout(timeout, rx.recv()).await;
-            listen_handle.abort();
+
+            if let Some(handle) = listen_handle {
+                handle.abort();
+            }
+            drop(guard);
 
             match response {
                 Ok(Some(msg)) => Ok(ToolResult {

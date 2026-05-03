@@ -11,6 +11,7 @@ pub mod history_pruner;
 pub mod loop_;
 pub mod loop_detector;
 pub mod memory_loader;
+pub mod pending_response;
 pub mod personality;
 pub mod prompt;
 pub mod thinking;

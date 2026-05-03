@@ -6652,7 +6652,11 @@ mod tests {
             .find(|msg| msg.role == "user" && msg.content.starts_with("[Tool results]"))
             .expect("tool results message should be present");
         assert!(tool_results.content.contains("hello"));
-        assert!(!tool_results.content.contains("The operation was NOT performed."));
+        assert!(
+            !tool_results
+                .content
+                .contains("The operation was NOT performed.")
+        );
     }
 
     #[tokio::test]

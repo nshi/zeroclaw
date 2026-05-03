@@ -7,6 +7,9 @@
 //! [`ReactionTool`](super::reaction::ReactionTool).
 
 use super::traits::{Tool, ToolResult};
+use crate::agent::pending_response::{
+    MessageContext, current_message_context, register_waiter, scope_key_for_context,
+};
 use crate::channels::traits::{Channel, ChannelMessage, SendMessage};
 use crate::require_str;
 use crate::security::SecurityPolicy;
@@ -153,11 +156,20 @@ impl Tool for AskUserTool {
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string());
 
-        let reply_target = args
+        // Default reply_target / thread routing to the in-flight message
+        // context so the question goes back to the user who asked, in the
+        // correct Slack thread / Telegram chat.
+        let dispatch_ctx: Option<MessageContext> = current_message_context();
+        let arg_reply_target = args
             .get("reply_target")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let reply_target = arg_reply_target
+            .clone()
+            .or_else(|| dispatch_ctx.as_ref().map(|c| c.reply_target.clone()))
+            .unwrap_or_default();
 
         // Resolve channel from handle — block-scoped to drop the RwLock guard
         // before any `.await` (parking_lot guards are !Send).
@@ -188,10 +200,41 @@ impl Tool for AskUserTool {
             }
         };
 
+        // Register a waiter BEFORE sending the question so a fast reply
+        // cannot race ahead of registration. Falls back to spawning a fresh
+        // listener when no dispatch context is available (CLI runs, tests).
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMessage>(1);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+
+        // Register against the original dispatch scope. If the LLM redirected
+        // the question to a different reply_target, replies there belong to a
+        // different sender/conversation we cannot predict — those will fall
+        // through to normal dispatch.
+        let _waiter_guard = dispatch_ctx
+            .as_ref()
+            .map(|ctx| register_waiter(scope_key_for_context(ctx), tx.clone()));
+
+        let listen_handle = if dispatch_ctx.is_none() {
+            // No dispatch context — keep legacy behavior so CLI runs and
+            // tests that exercise ask_user in isolation still work.
+            let listen_channel = Arc::clone(&channel);
+            let listen_tx = tx.clone();
+            Some(tokio::spawn(async move {
+                listen_channel.listen(listen_tx).await
+            }))
+        } else {
+            None
+        };
+        drop(tx);
+
         // Format and send the question
         let text = format_question(&question, choices.as_deref());
-        let msg = SendMessage::new(&text, &reply_target);
+        let msg = SendMessage::new(&text, &reply_target)
+            .in_thread(dispatch_ctx.as_ref().and_then(|c| c.thread_ts.clone()));
         if let Err(e) = channel.send(&msg).await {
+            if let Some(handle) = listen_handle {
+                handle.abort();
+            }
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -201,18 +244,13 @@ impl Tool for AskUserTool {
             });
         }
 
-        // Listen for user response with timeout
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMessage>(1);
-        let timeout = std::time::Duration::from_secs(timeout_secs);
-
-        // Spawn a listener task on the channel
-        let listen_channel = Arc::clone(&channel);
-        let listen_handle = tokio::spawn(async move { listen_channel.listen(tx).await });
-
         let response = tokio::time::timeout(timeout, rx.recv()).await;
 
-        // Abort the listener once we have a response or timeout
-        listen_handle.abort();
+        if let Some(handle) = listen_handle {
+            handle.abort();
+        }
+        // _waiter_guard is dropped here, deregistering the scope.
+        drop(_waiter_guard);
 
         match response {
             Ok(Some(msg)) => Ok(ToolResult {

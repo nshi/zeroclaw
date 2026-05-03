@@ -3411,7 +3411,13 @@ async fn dispatch_worker(
         }
     }
 
-    process_channel_message(ctx, msg, cancellation_token).await;
+    let message_ctx = crate::agent::pending_response::MessageContext::from_message(&msg);
+    crate::agent::pending_response::CURRENT_MESSAGE_CONTEXT
+        .scope(
+            message_ctx,
+            process_channel_message(ctx, msg, cancellation_token),
+        )
+        .await;
 
     if register_in_flight {
         let mut active = in_flight.lock().await;
@@ -3480,6 +3486,15 @@ async fn run_message_dispatch_loop(
                     "stop command: no registered channel found for reply"
                 );
             }
+            continue;
+        }
+
+        // Forward the message to a tool that is awaiting a reply on this
+        // scope (e.g. `ask_user`, `escalate_to_human`) instead of treating it
+        // as a fresh conversation. Without this, Slack DM replies — which
+        // share the same scope as the in-flight task — would either interrupt
+        // the agent or queue behind it, leaving the waiting tool to time out.
+        if msg.channel != "cli" && crate::agent::pending_response::try_route(&msg).await {
             continue;
         }
 
