@@ -21,6 +21,19 @@ pub(crate) fn floor_char_boundary(s: &str, i: usize) -> usize {
     pos
 }
 
+/// Count the number of bytes a string would occupy when JSON-serialized
+/// (excluding the surrounding quotes). This avoids allocating a throwaway
+/// `serde_json::to_string` just to measure length.
+fn json_escaped_len(s: &str) -> usize {
+    s.bytes()
+        .map(|b| match b {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' => 2,
+            b if b < 0x20 => 6, // \u00XX
+            _ => 1,
+        })
+        .sum()
+}
+
 /// Truncate a tool result to `max_chars`, keeping head (2/3) + tail (1/3)
 /// with a marker in the middle. Returns input unchanged if within limit or
 /// `max_chars == 0` (disabled).
@@ -53,20 +66,47 @@ pub(crate) fn truncate_tool_message_content(content: &str, max_chars: usize) -> 
     if value.get("tool_call_id").is_none() {
         return truncate_plain_text(content, max_chars);
     }
-    let Some(inner) = value.get("content").and_then(|v| v.as_str()) else {
+    // Clone inner content to release the immutable borrow on `value`,
+    // which we need to mutate below.
+    let Some(inner) = value.get("content").and_then(|v| v.as_str()).map(String::from) else {
         return truncate_plain_text(content, max_chars);
     };
 
-    // inner.len() is raw bytes; content.len() is JSON-serialized (escaping may
-    // make the serialized form shorter than the raw value), so use saturating_sub.
-    let envelope_overhead = content.len().saturating_sub(inner.len());
-    let inner_max = max_chars.saturating_sub(envelope_overhead);
-    if inner_max == 0 || inner.len() <= inner_max {
-        return truncate_plain_text(content, max_chars);
+    // Compute serialized length of the inner string without allocating:
+    // each byte that needs JSON escaping expands, plus 2 for the quotes.
+    let inner_serialized_len = json_escaped_len(&inner) + 2;
+    let envelope_overhead = content.len().saturating_sub(inner_serialized_len);
+
+    let mut inner_max = max_chars.saturating_sub(envelope_overhead);
+    // When escaping makes the envelope estimate unreliable, use a
+    // conservative fraction of the budget as a starting point.
+    if inner_max == 0 {
+        inner_max = max_chars / 4;
+    }
+    if inner.len() <= inner_max {
+        return content.to_string();
     }
 
-    let truncated = truncate_plain_text(inner, inner_max);
-    value["content"] = serde_json::Value::String(truncated);
+    // Shrink inner content until the re-serialized JSON fits the budget.
+    // Capped to prevent pathological inputs from hot-looping.
+    for _ in 0..8 {
+        let truncated = truncate_plain_text(&inner, inner_max);
+        value["content"] = serde_json::Value::String(truncated);
+        match serde_json::to_string(&value) {
+            Ok(result) if result.len() <= max_chars => return result,
+            Ok(result) => {
+                let overshoot = result.len() - max_chars;
+                inner_max = inner_max.saturating_sub(overshoot + 1);
+                if inner_max == 0 {
+                    break;
+                }
+            }
+            Err(_) => return truncate_plain_text(content, max_chars),
+        }
+    }
+
+    // Envelope alone exceeds budget or iterations exhausted; drop inner.
+    value["content"] = serde_json::Value::String("[content truncated]".into());
     serde_json::to_string(&value).unwrap_or_else(|_| truncate_plain_text(content, max_chars))
 }
 

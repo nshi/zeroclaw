@@ -288,9 +288,14 @@ impl Provider for RouterProvider {
     }
 
     fn supports_streaming_tool_events(&self) -> bool {
+        // Use `all()` not `any()`: the router doesn't know which provider
+        // will handle a given request, so it can only claim support when
+        // every routed provider supports it. With `any()`, the agent loop
+        // sees "supported", attempts streaming, but the resolved provider
+        // may not support it — causing a fallback on every tool-bearing call.
         self.providers
             .iter()
-            .any(|(_, provider)| provider.supports_streaming_tool_events())
+            .all(|(_, provider)| provider.supports_streaming_tool_events())
     }
 
     fn stream_chat_with_history(
