@@ -11,12 +11,60 @@ use uuid::Uuid;
 
 const DEFAULT_TRACE_REL_PATH: &str = "state/runtime-trace.jsonl";
 
+/// Trigger that initiated the current trace scope.
+///
+/// Distinguishes interactive chat sessions from background cron-fired agent
+/// runs so the viewer can render them separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TraceKind {
+    #[default]
+    Chat,
+    Cron,
+}
+
+/// Per-scope trace context propagated via a tokio task-local.
+///
+/// Wrapped in an `Arc` at the task-local boundary so `record_event` can
+/// pick it up via a cheap pointer clone instead of cloning the inner
+/// `String` fields on every call (the agent loop emits dozens per turn).
+#[derive(Debug, Clone)]
+pub struct TraceContext {
+    pub kind: TraceKind,
+    pub session_id: Option<String>,
+    pub cron_job_id: Option<String>,
+    pub cron_job_name: Option<String>,
+}
+
+impl TraceContext {
+    pub fn chat(session_id: String) -> Self {
+        Self {
+            kind: TraceKind::Chat,
+            session_id: Some(session_id),
+            cron_job_id: None,
+            cron_job_name: None,
+        }
+    }
+
+    /// Build a cron-trigger context. The viewer treats each cron firing as
+    /// its own conversation session, so `session_id` is the per-firing run id.
+    pub fn cron(job_id: String, job_name: Option<String>, run_id: String) -> Self {
+        Self {
+            kind: TraceKind::Cron,
+            session_id: Some(run_id),
+            cron_job_id: Some(job_id),
+            cron_job_name: job_name,
+        }
+    }
+}
+
 tokio::task_local! {
-    /// Provider session ID for the current message-processing scope.
-    /// Set in `channels::process_channel_message` so that every
-    /// `record_event` / `trace_api_request` inside the scope automatically
-    /// carries the session identifier.
-    pub static RUNTIME_TRACE_SESSION_ID: Option<String>;
+    /// Trace context for the current message-processing scope.
+    /// Set in `channels::process_channel_message` (chat) and
+    /// `cron::scheduler::run_agent_job` (cron) so every `record_event` /
+    /// `trace_api_request` inside the scope automatically carries
+    /// kind/session/cron-origin metadata.
+    pub static RUNTIME_TRACE_CONTEXT: Option<Arc<TraceContext>>;
 }
 
 /// Runtime trace storage policy.
@@ -38,11 +86,16 @@ impl RuntimeTraceStorageMode {
 }
 
 /// Structured runtime trace event for tool-call and model-reply diagnostics.
+///
+/// `kind` distinguishes the trigger (chat vs cron). Legacy JSONL written
+/// before the field existed deserializes with the `Default` (chat).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeTraceEvent {
     pub id: String,
     pub timestamp: String,
     pub event_type: String,
+    #[serde(default)]
+    pub kind: TraceKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,6 +106,10 @@ pub struct RuntimeTraceEvent {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cron_job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cron_job_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub success: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,6 +259,18 @@ pub fn init_from_config(config: &ObservabilityConfig, workspace_dir: &Path) {
     *guard = logger;
 }
 
+/// Returns `true` if a trace logger is currently installed.
+///
+/// Callers should consult this before constructing expensive trace payloads
+/// (large JSON objects, string previews) so that work is skipped when
+/// `observability.runtime_trace_mode = "none"`.
+pub fn is_enabled() -> bool {
+    TRACE_LOGGER
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+}
+
 /// Record a runtime trace event.
 pub fn record_event(
     event_type: &str,
@@ -221,20 +290,33 @@ pub fn record_event(
         return;
     };
 
-    let session_id = RUNTIME_TRACE_SESSION_ID
-        .try_with(|sid| sid.clone())
+    let context = RUNTIME_TRACE_CONTEXT
+        .try_with(|ctx| ctx.clone())
         .ok()
         .flatten();
+
+    let (kind, session_id, cron_job_id, cron_job_name) = match context {
+        Some(ctx) => (
+            ctx.kind,
+            ctx.session_id.clone(),
+            ctx.cron_job_id.clone(),
+            ctx.cron_job_name.clone(),
+        ),
+        None => (TraceKind::default(), None, None, None),
+    };
 
     let event = RuntimeTraceEvent {
         id: Uuid::new_v4().to_string(),
         timestamp: Local::now().to_rfc3339(),
         event_type: event_type.to_string(),
+        kind,
         channel: channel.map(str::to_string),
         provider: provider.map(str::to_string),
         model: model.map(str::to_string),
         session_id,
         turn_id: turn_id.map(str::to_string),
+        cron_job_id,
+        cron_job_name,
         success,
         message: message.map(str::to_string),
         payload,
@@ -378,6 +460,11 @@ pub fn find_event_by_id(path: &Path, id: &str) -> Result<Option<RuntimeTraceEven
 mod tests {
     use super::*;
 
+    /// Serializes tests that mutate the global `TRACE_LOGGER`. Without this,
+    /// concurrent tests overwrite each other's logger and observe events
+    /// from sibling tests.
+    static GLOBAL_LOGGER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn test_observability_config() -> ObservabilityConfig {
         ObservabilityConfig {
             backend: "none".to_string(),
@@ -430,11 +517,14 @@ mod tests {
                 id: format!("id-{i}"),
                 timestamp: Utc::now().to_rfc3339(),
                 event_type: "test".into(),
+                kind: TraceKind::default(),
                 channel: None,
                 provider: None,
                 model: None,
                 session_id: None,
                 turn_id: None,
+                cron_job_id: None,
+                cron_job_name: None,
                 success: None,
                 message: Some(format!("event-{i}")),
                 payload: serde_json::json!({ "i": i }),
@@ -459,11 +549,14 @@ mod tests {
             id: target_id.into(),
             timestamp: Utc::now().to_rfc3339(),
             event_type: "tool_call_result".into(),
+            kind: TraceKind::default(),
             channel: Some("telegram".into()),
             provider: Some("openrouter".into()),
             model: Some("x".into()),
             session_id: None,
             turn_id: Some("turn-1".into()),
+            cron_job_id: None,
+            cron_job_name: None,
             success: Some(false),
             message: Some("boom".into()),
             payload: serde_json::json!({ "error": "boom" }),
@@ -517,7 +610,71 @@ mod tests {
     }
 
     #[test]
+    fn legacy_event_without_kind_field_defaults_to_chat() {
+        // Legacy JSONL produced before `kind` existed must still parse.
+        let raw = r#"{"id":"x","timestamp":"2024-01-01T00:00:00+00:00","event_type":"channel_message_inbound","channel":"telegram","payload":{}}"#;
+        let event: RuntimeTraceEvent = serde_json::from_str(raw).unwrap();
+        assert_eq!(event.kind, TraceKind::Chat);
+        assert!(event.cron_job_id.is_none());
+    }
+
+    // The lock is intentional: serialize tests that mutate the global
+    // `TRACE_LOGGER` so they observe only their own events. The await is
+    // inside `RUNTIME_TRACE_CONTEXT.scope`, which never blocks the runtime.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn record_event_under_cron_context_populates_cron_fields() {
+        let _g = GLOBAL_LOGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("trace.jsonl");
+        {
+            let logger = Arc::new(RuntimeTraceLogger::new(
+                RuntimeTraceStorageMode::Full,
+                10_000,
+                path.clone(),
+            ));
+            let mut guard = TRACE_LOGGER.write().unwrap();
+            *guard = Some(logger);
+        }
+
+        let ctx = Arc::new(TraceContext::cron(
+            "job-1".to_string(),
+            Some("Backup".to_string()),
+            "run-abc".to_string(),
+        ));
+        RUNTIME_TRACE_CONTEXT
+            .scope(Some(ctx), async {
+                record_event(
+                    "tool_call_start",
+                    None,
+                    None,
+                    None,
+                    Some("turn-1"),
+                    None,
+                    None,
+                    serde_json::json!({}),
+                );
+            })
+            .await;
+
+        {
+            let mut guard = TRACE_LOGGER.write().unwrap();
+            *guard = None;
+        }
+
+        let events = load_events(&path, 100, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.kind, TraceKind::Cron);
+        assert_eq!(ev.cron_job_id.as_deref(), Some("job-1"));
+        assert_eq!(ev.cron_job_name.as_deref(), Some("Backup"));
+        // session_id is the per-firing run_id — each cron firing is a viewer session.
+        assert_eq!(ev.session_id.as_deref(), Some("run-abc"));
+    }
+
+    #[test]
     fn trace_api_request_integration() {
+        let _g = GLOBAL_LOGGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Full integration test via the global logger.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("trace.jsonl");

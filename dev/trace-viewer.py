@@ -169,6 +169,7 @@ class Turn:
     __slots__ = (
         "turn_id", "session_id", "events", "start_time", "end_time",
         "channel", "model", "user_prompt",
+        "kind", "cron_job_id", "cron_job_name",
     )
 
     def __init__(self, turn_id: str):
@@ -180,6 +181,9 @@ class Turn:
         self.channel: str = ""
         self.model: str = ""
         self.user_prompt: str = ""
+        self.kind: str = "chat"  # default for legacy events
+        self.cron_job_id: str = ""
+        self.cron_job_name: str = ""
 
     def finalize(self) -> None:
         self.events.sort(key=lambda e: e.get("timestamp", ""))
@@ -193,9 +197,20 @@ class Turn:
                 self.model = ev["model"]
             if not self.session_id and ev.get("session_id"):
                 self.session_id = ev["session_id"]
-            if not self.user_prompt and ev.get("event_type") == "channel_message_inbound":
-                payload = ev.get("payload") or {}
+            ev_kind = ev.get("kind") or "chat"
+            if ev_kind == "cron":
+                self.kind = "cron"
+            if not self.cron_job_id and ev.get("cron_job_id"):
+                self.cron_job_id = ev["cron_job_id"]
+            if not self.cron_job_name and ev.get("cron_job_name"):
+                self.cron_job_name = ev["cron_job_name"]
+            etype = ev.get("event_type")
+            payload = ev.get("payload") or {}
+            if not self.user_prompt and etype == "channel_message_inbound":
                 self.user_prompt = payload.get("content_preview", "")
+            elif not self.user_prompt and etype == "cron_job_started":
+                # Cron analogue of inbound: prompt lives in the started event.
+                self.user_prompt = payload.get("prompt", "")
 
 
 class ConversationSession:
@@ -203,6 +218,7 @@ class ConversationSession:
     __slots__ = (
         "session_id", "turns", "start_time", "end_time",
         "channel", "model", "user_prompts",
+        "kind", "cron_job_id", "cron_job_name",
     )
 
     def __init__(self, session_id: str):
@@ -213,6 +229,9 @@ class ConversationSession:
         self.channel: str = ""
         self.model: str = ""
         self.user_prompts: list[str] = []
+        self.kind: str = "chat"
+        self.cron_job_id: str = ""
+        self.cron_job_name: str = ""
 
     @property
     def turn_count(self) -> int:
@@ -230,11 +249,20 @@ class ConversationSession:
         self.channel = ""
         self.model = ""
         self.user_prompts = []
+        self.kind = "chat"
+        self.cron_job_id = ""
+        self.cron_job_name = ""
         for t in self.turns:
             if not self.channel and t.channel:
                 self.channel = t.channel
             if not self.model and t.model:
                 self.model = t.model
+            if t.kind == "cron":
+                self.kind = "cron"
+            if not self.cron_job_id and t.cron_job_id:
+                self.cron_job_id = t.cron_job_id
+            if not self.cron_job_name and t.cron_job_name:
+                self.cron_job_name = t.cron_job_name
             if t.user_prompt:
                 self.user_prompts.append(t.user_prompt)
 
@@ -265,11 +293,13 @@ def group_events_into_turns(events: list[dict]) -> list[Turn]:
             last_tid = tid
         else:
             etype = ev.get("event_type", "")
-            if etype == "channel_message_outbound" and last_tid and last_tid in buckets:
+            # Trailing-orphan events (cron and chat alike): attach to the
+            # most recent turn so they don't fragment the session.
+            if etype in ("channel_message_outbound", "cron_job_finished") and last_tid and last_tid in buckets:
                 buckets[last_tid].events.append(ev)
-            elif etype == "channel_message_inbound":
-                orphans_before.append((i, ev))
             else:
+                # cron_job_started, channel_message_inbound, or anything else
+                # without a turn_id: hold until we see the next turn_id.
                 orphans_before.append((i, ev))
 
     standalone: list[Turn] = []
@@ -322,20 +352,43 @@ def group_turns_into_sessions(turns: list[Turn]) -> list[ConversationSession]:
 # ---------------------------------------------------------------------------
 
 def search_sessions(path: str, term: str) -> list[ConversationSession]:
-    """Find sessions whose inbound prompt matches *term*.
+    """Find sessions whose inbound prompt or cron metadata matches *term*.
 
-    Because ``channel_message_inbound`` carries no ``turn_id`` in the real
-    trace format, we do positional association: an inbound event is linked
-    to the next ``turn_id`` that appears in the stream.
+    For chat: ``channel_message_inbound`` carries no ``turn_id``, so we do
+    positional association — an inbound event links to the next ``turn_id``.
+    For cron: matches ``cron_job_id``/``cron_job_name`` on any event, or the
+    prompt inside ``cron_job_started``.
     """
     term_lower = term.lower()
     matching_turn_ids: set[str] = set()
+    matching_session_ids: set[str] = set()
 
-    # Pass 1: find turn_ids whose preceding inbound prompt matches.
+    # Pass 1a: cron-side match — any event tagged kind=cron whose
+    # job_id/job_name/started-prompt contains the term contributes its
+    # session_id (which mirrors run_id).
+    # Pass 1b: chat-side positional match on inbound preview.
     pending_match = False
     for evt in forward_line_reader(path):
         etype = evt.get("event_type", "")
         tid = evt.get("turn_id")
+        kind = evt.get("kind") or "chat"
+        sid = evt.get("session_id")
+
+        if kind == "cron":
+            haystack_parts = [
+                evt.get("cron_job_id") or "",
+                evt.get("cron_job_name") or "",
+            ]
+            if etype == "cron_job_started":
+                payload = evt.get("payload") or {}
+                haystack_parts.append(payload.get("prompt", ""))
+            if any(term_lower in p.lower() for p in haystack_parts if p):
+                if sid:
+                    matching_session_ids.add(sid)
+                if tid:
+                    matching_turn_ids.add(tid)
+            continue
+
         if etype == "channel_message_inbound":
             payload = evt.get("payload") or {}
             preview = payload.get("content_preview", "")
@@ -347,14 +400,25 @@ def search_sessions(path: str, term: str) -> list[ConversationSession]:
             matching_turn_ids.add(tid)
             pending_match = False
 
-    if not matching_turn_ids:
+    if not matching_turn_ids and not matching_session_ids:
         return []
 
-    # Pass 2: collect all events that belong to matched turns
+    # Pass 2: collect all events that belong to matched turns or matched
+    # cron sessions.
     matching_events: list[dict] = []
     pending_orphans: list[dict] = []
     last_matched = False
     for evt in forward_line_reader(path):
+        sid = evt.get("session_id")
+        if sid and sid in matching_session_ids:
+            matching_events.extend(pending_orphans)
+            pending_orphans.clear()
+            matching_events.append(evt)
+            # Cron sessions don't use the chat orphan-attachment mechanism;
+            # leave last_matched alone so a subsequent chat outbound isn't
+            # mis-attributed to this cron session.
+            last_matched = False
+            continue
         tid = evt.get("turn_id")
         if tid:
             is_match = tid in matching_turn_ids
@@ -431,17 +495,25 @@ def display_session_list(sessions: list[ConversationSession], search_term: str |
     print()
     for i, s in enumerate(sessions, 1):
         ts = s.start_time or "unknown"
-        ch = s.channel or "?"
         mdl = s.model or "?"
         idx = c(f"[{i}]", "bold")
         sid_short = short_id(s.session_id)
-        meta = c(f"{ts} | {ch} | {mdl} | {s.turn_count} turns, {s.event_count} events | sid={sid_short}", "dim")
-        print(f"{idx} {meta}")
+        if s.kind == "cron":
+            tag = c("[CRON]", "yellow", "bold")
+            origin = s.cron_job_name or s.cron_job_id or "?"
+            meta = c(f"{ts} | job={origin} | {mdl} | {s.turn_count} turns, {s.event_count} events | run={sid_short}", "dim")
+            print(f"{idx} {tag} {meta}")
+            prompt_color = "yellow"
+        else:
+            ch = s.channel or "?"
+            meta = c(f"{ts} | {ch} | {mdl} | {s.turn_count} turns, {s.event_count} events | sid={sid_short}", "dim")
+            print(f"{idx} {meta}")
+            prompt_color = "green"
         # Show first user prompt as preview
         prompt = s.user_prompts[0] if s.user_prompts else "(no user prompt)"
         if len(prompt) > 100:
             prompt = prompt[:97] + "..."
-        print(f"    {c(prompt, 'green')}")
+        print(f"    {c(prompt, prompt_color)}")
         if len(s.user_prompts) > 1:
             print(f"    {c(f'... and {len(s.user_prompts) - 1} more turn(s)', 'dim')}")
 
@@ -1248,6 +1320,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TYPE",
         help="Filter to only show events of this type (e.g. provider_api_request)",
     )
+    p.add_argument(
+        "--kind",
+        choices=("chat", "cron", "all"),
+        default="all",
+        help="Filter sessions by trigger kind (default: all)",
+    )
     return p
 
 
@@ -1270,7 +1348,15 @@ def main() -> None:
     if args.search_term:
         sessions = search_sessions(args.file, args.search_term)
     else:
-        sessions = recent_sessions(args.file, args.last)
+        # Over-fetch when filtering by kind: chat and cron sessions can be
+        # interleaved, so `--last 10 --kind cron` needs to see more than 10
+        # of the most-recent sessions to find 10 cron ones.
+        fetch_count = args.last * 5 if args.kind != "all" else args.last
+        sessions = recent_sessions(args.file, fetch_count)
+
+    if args.kind != "all":
+        sessions = [s for s in sessions if s.kind == args.kind]
+        sessions = sessions[: args.last]
 
     # Apply --event-type filter: keep only matching events within each turn,
     # then drop empty turns and sessions.

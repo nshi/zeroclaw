@@ -2851,8 +2851,12 @@ async fn process_channel_message(
                     Duration::from_secs(timeout_budget_secs),
                     crate::agent::loop_::TOOL_LOOP_COST_TRACKING_CONTEXT.scope(
                         cost_tracking_context.clone(),
-                    crate::observability::runtime_trace::RUNTIME_TRACE_SESSION_ID.scope(
-                        Some(provider_session_id.clone()),
+                    crate::observability::runtime_trace::RUNTIME_TRACE_CONTEXT.scope(
+                        Some(std::sync::Arc::new(
+                            crate::observability::runtime_trace::TraceContext::chat(
+                                provider_session_id.clone(),
+                            ),
+                        )),
                     run_tool_call_loop(
                         active_provider.as_ref(),
                         &mut history,
