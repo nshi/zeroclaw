@@ -4775,6 +4775,35 @@ mod tests {
     }
 
     #[test]
+    fn truncate_tool_message_content_preserves_json_with_heavy_escaping() {
+        // Simulate binary content (null bytes) that expands heavily under JSON escaping.
+        // Each \0 becomes \u0000 (6 chars) in JSON, so 5000 null bytes ≈ 30000 JSON chars.
+        let inner = "\0".repeat(5000);
+        let content = serde_json::json!({
+            "tool_call_id": "call_binary_test",
+            "content": inner,
+        })
+        .to_string();
+
+        // The JSON-serialized content is ~30k+ chars. Truncate to 2000.
+        let result = truncate_tool_message_content(&content, 2000);
+
+        // Must remain valid JSON with tool_call_id preserved
+        let parsed: serde_json::Value = serde_json::from_str(&result)
+            .expect("truncated binary tool message must remain valid JSON");
+        assert_eq!(
+            parsed.get("tool_call_id").and_then(|v| v.as_str()),
+            Some("call_binary_test"),
+            "tool_call_id must be preserved even with heavily-escaped content"
+        );
+        assert!(
+            result.len() <= 2000,
+            "result len {} must be within budget 2000",
+            result.len()
+        );
+    }
+
+    #[test]
     fn truncate_tool_message_content_plain_text_fallback() {
         let content = "x".repeat(5000);
         let result = truncate_tool_message_content(&content, 2000);
@@ -6652,7 +6681,11 @@ mod tests {
             .find(|msg| msg.role == "user" && msg.content.starts_with("[Tool results]"))
             .expect("tool results message should be present");
         assert!(tool_results.content.contains("hello"));
-        assert!(!tool_results.content.contains("The operation was NOT performed."));
+        assert!(
+            !tool_results
+                .content
+                .contains("The operation was NOT performed.")
+        );
     }
 
     #[tokio::test]

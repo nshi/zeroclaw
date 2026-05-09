@@ -208,21 +208,36 @@ impl Tool for FileReadTool {
                     });
                 }
 
-                // Lossy fallback — replaces invalid bytes with U+FFFD
-                let lossy = String::from_utf8_lossy(&bytes).into_owned();
-                Ok(ToolResult {
-                    success: true,
-                    output: lossy,
-                    error: None,
-                })
+                let filename = resolved_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default();
+
+                if is_pdf_magic(&bytes) {
+                    return ToolResult::err(format!(
+                        "'{filename}' is a PDF file but PDF text extraction \
+                         is not available. Use the pdf_read tool or web_fetch \
+                         if the content is available online."
+                    ));
+                }
+
+                ToolResult::err(format!(
+                    "'{filename}' is a binary file and cannot be read as text. \
+                     If this is a database file (.db, .sqlite), use the \
+                     memory_recall tool or an appropriate query tool instead."
+                ))
             }
         }
     }
 }
 
+fn is_pdf_magic(bytes: &[u8]) -> bool {
+    bytes.len() >= 5 && &bytes[..5] == b"%PDF-"
+}
+
 #[cfg(feature = "rag-pdf")]
 fn try_extract_pdf_text(bytes: &[u8]) -> Option<String> {
-    if bytes.len() < 5 || &bytes[..5] != b"%PDF-" {
+    if !is_pdf_magic(bytes) {
         return None;
     }
     let text = pdf_extract::extract_text_from_mem(bytes).ok()?;
@@ -638,6 +653,7 @@ mod tests {
     }
 
     /// PDF files should be readable via pdf-extract text extraction.
+    #[cfg(feature = "rag-pdf")]
     #[tokio::test]
     async fn file_read_extracts_pdf_text() {
         let dir = std::env::temp_dir().join("mentat_test_file_read_pdf");
@@ -667,14 +683,40 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
-    /// Non-UTF-8 binary files should be read with lossy conversion.
+    /// Without rag-pdf feature, PDF files should be rejected with a helpful error.
+    #[cfg(not(feature = "rag-pdf"))]
     #[tokio::test]
-    async fn file_read_lossy_reads_binary_file() {
-        let dir = std::env::temp_dir().join("mentat_test_file_read_lossy");
+    async fn file_read_rejects_pdf_without_feature() {
+        let dir = std::env::temp_dir().join("mentat_test_file_read_pdf_reject");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
 
-        // Write bytes that are not valid UTF-8 and not a PDF
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/test_document.pdf");
+        tokio::fs::copy(&fixture, dir.join("report.pdf"))
+            .await
+            .expect("copy PDF fixture");
+
+        let tool = FileReadTool::new(test_security(dir.clone()));
+        let result = tool.execute(json!({"path": "report.pdf"})).await.unwrap();
+
+        assert!(!result.success, "PDF read without feature must fail");
+        let err = result.error.unwrap();
+        assert!(
+            err.contains("PDF file"),
+            "error must mention PDF, got: {err}"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Non-UTF-8 binary files must be rejected with a clear error.
+    #[tokio::test]
+    async fn file_read_rejects_binary_file() {
+        let dir = std::env::temp_dir().join("mentat_test_file_read_binary_reject");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
         let binary_data: Vec<u8> = vec![0x00, 0x80, 0xFF, 0xFE, b'h', b'i', 0x80];
         tokio::fs::write(dir.join("data.bin"), &binary_data)
             .await
@@ -683,20 +725,15 @@ mod tests {
         let tool = FileReadTool::new(test_security(dir.clone()));
         let result = tool.execute(json!({"path": "data.bin"})).await.unwrap();
 
+        assert!(!result.success, "binary read must fail");
+        let err = result.error.unwrap();
         assert!(
-            result.success,
-            "lossy read must succeed, error: {:?}",
-            result.error
+            err.contains("binary file"),
+            "error must mention binary file, got: {err}"
         );
         assert!(
-            result.output.contains('\u{FFFD}'),
-            "lossy output must contain replacement character, got: {:?}",
-            result.output
-        );
-        assert!(
-            result.output.contains("hi"),
-            "lossy output must preserve valid ASCII, got: {:?}",
-            result.output
+            err.contains("data.bin"),
+            "error must include filename, got: {err}"
         );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -782,6 +819,7 @@ mod tests {
     /// End-to-end test: scripted provider calls `file_read` on a real PDF
     /// fixture, the tool extracts text via pdf-extract, and the extracted
     /// content reaches the provider in the tool result message.
+    #[cfg(feature = "rag-pdf")]
     #[tokio::test]
     async fn e2e_agent_file_read_pdf_extraction() {
         use crate::agent::agent::Agent;
@@ -880,16 +918,15 @@ mod tests {
     }
 
     /// End-to-end test: agent calls `file_read` on a binary file, gets
-    /// lossy UTF-8 output with replacement characters in the tool result.
+    /// a rejection error in the tool result.
     #[tokio::test]
-    async fn e2e_agent_file_read_lossy_binary() {
+    async fn e2e_agent_file_read_rejects_binary() {
         use crate::agent::agent::Agent;
         use crate::agent::dispatcher::NativeToolDispatcher;
         use crate::providers::{ChatResponse, Provider, ToolCall};
         use e2e_helpers::*;
 
-        // ── Set up workspace with binary file ──
-        let workspace = std::env::temp_dir().join("mentat_test_e2e_file_read_lossy");
+        let workspace = std::env::temp_dir().join("mentat_test_e2e_file_read_binary_reject");
         let _ = tokio::fs::remove_dir_all(&workspace).await;
         tokio::fs::create_dir_all(&workspace).await.unwrap();
 
@@ -918,7 +955,7 @@ mod tests {
                 provider_attrs: None,
             },
             ChatResponse {
-                text: Some("The file appears to be binary data.".into()),
+                text: Some("The file is binary, I'll use memory_recall instead.".into()),
                 tool_calls: vec![],
                 usage: None,
                 reasoning_content: None,
@@ -939,11 +976,11 @@ mod tests {
         let response = agent.turn("Read data.bin").await.unwrap();
 
         assert!(
-            response.contains("binary"),
-            "agent response must mention binary, got: {response}",
+            response.contains("binary") || response.contains("memory_recall"),
+            "agent response must acknowledge binary rejection, got: {response}",
         );
 
-        // Verify tool result contains lossy output with replacement chars
+        // Verify tool result contains the rejection error
         {
             let all_requests = recorded.lock().unwrap();
             assert!(
@@ -958,13 +995,8 @@ mod tests {
                 .expect("second request must contain a tool result message");
 
             assert!(
-                tool_result_msg.content.contains("valid"),
-                "tool result must preserve valid ASCII from binary file, got: {}",
-                tool_result_msg.content,
-            );
-            assert!(
-                tool_result_msg.content.contains('\u{FFFD}'),
-                "tool result must contain replacement character for invalid bytes, got: {}",
+                tool_result_msg.content.contains("binary file"),
+                "tool result must contain binary rejection, got: {}",
                 tool_result_msg.content,
             );
         }

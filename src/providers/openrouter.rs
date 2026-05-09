@@ -316,6 +316,19 @@ impl OpenRouterProvider {
                                 reasoning_details: None,
                             };
                         }
+                        // JSON parse failed (e.g. truncation broke the wrapper).
+                        // Try to salvage tool_call_id via substring search so
+                        // providers that require it (Gemini) don't reject the
+                        // entire request.
+                        let tool_call_id = Self::extract_tool_call_id_from_broken_json(&m.content);
+                        return NativeMessage {
+                            role: "tool".to_string(),
+                            content: Some(MessageContent::Text(m.content.clone())),
+                            tool_call_id,
+                            tool_calls: None,
+                            reasoning_content: None,
+                            reasoning_details: None,
+                        };
                     }
 
                     NativeMessage {
@@ -384,6 +397,22 @@ impl OpenRouterProvider {
             usage: None,
             reasoning_content,
             provider_attrs,
+        }
+    }
+
+    /// Best-effort extraction of `tool_call_id` from a tool message whose
+    /// JSON wrapper was broken by truncation. Falls back to `None` if the
+    /// field cannot be found.
+    fn extract_tool_call_id_from_broken_json(content: &str) -> Option<String> {
+        // Look for "tool_call_id":"<value>" pattern
+        let marker = "\"tool_call_id\":\"";
+        let start = content.find(marker)? + marker.len();
+        let end = content[start..].find('"')? + start;
+        let id = &content[start..end];
+        if id.is_empty() {
+            None
+        } else {
+            Some(id.to_string())
         }
     }
 
@@ -1097,6 +1126,29 @@ mod tests {
             Some("done")
         );
         assert!(converted[0].tool_calls.is_none());
+    }
+
+    #[test]
+    fn convert_messages_salvages_tool_call_id_from_broken_json() {
+        // Simulate a tool message whose JSON wrapper was broken by truncation
+        let broken = r#"{"content":"SQLite\u0000\u0
+
+[... 139762 characters truncated ...]
+
+\u0001","tool_call_id":"tool_file_read_abc123"}"#;
+        let messages = vec![ChatMessage {
+            role: "tool".into(),
+            content: broken.into(),
+        }];
+
+        let converted = OpenRouterProvider::convert_messages(&messages);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, "tool");
+        assert_eq!(
+            converted[0].tool_call_id.as_deref(),
+            Some("tool_file_read_abc123"),
+            "must salvage tool_call_id from broken JSON"
+        );
     }
 
     #[test]
