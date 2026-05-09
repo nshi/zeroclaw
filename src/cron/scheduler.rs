@@ -225,6 +225,61 @@ async fn execute_and_persist_job(
     (job.id.clone(), success, output)
 }
 
+/// Emit the `cron_job_started` trace bookend.
+///
+/// Skipped (and the heavy payload not built) when no trace logger is
+/// installed — cron runs frequently and `serde_json::json!` allocates.
+fn emit_cron_started(job: &CronJob, prompt: &str, model_override: Option<&str>, run_id: &str) {
+    if !crate::observability::runtime_trace::is_enabled() {
+        return;
+    }
+    let payload = serde_json::json!({
+        "job_id": job.id,
+        "job_name": job.name,
+        "schedule": serde_json::to_value(&job.schedule).unwrap_or(serde_json::Value::Null),
+        "session_target": format!("{:?}", job.session_target),
+        "model_override": model_override,
+        "allowed_tools": job.allowed_tools,
+        "prompt": prompt,
+        "run_id": run_id,
+    });
+    crate::observability::runtime_trace::record_event(
+        "cron_job_started",
+        None,
+        None,
+        model_override,
+        None,
+        None,
+        None,
+        payload,
+    );
+}
+
+/// Emit the `cron_job_finished` trace bookend with a redacted output preview.
+fn emit_cron_finished(result: &Result<String>, duration_ms: u64) {
+    if !crate::observability::runtime_trace::is_enabled() {
+        return;
+    }
+    let success = result.is_ok();
+    let output_preview = match result {
+        Ok(s) => crate::util::truncate_with_ellipsis(s, 500),
+        Err(e) => crate::util::truncate_with_ellipsis(&format!("agent job failed: {e}"), 500),
+    };
+    crate::observability::runtime_trace::record_event(
+        "cron_job_finished",
+        None,
+        None,
+        None,
+        None,
+        Some(success),
+        None,
+        serde_json::json!({
+            "duration_ms": duration_ms,
+            "output_preview": output_preview,
+        }),
+    );
+}
+
 async fn run_agent_job(
     config: &Config,
     security: &SecurityPolicy,
@@ -265,21 +320,45 @@ async fn run_agent_job(
     );
     let model_override = job.model.clone();
 
-    let run_result = match job.session_target {
-        SessionTarget::Main | SessionTarget::Isolated => {
-            Box::pin(crate::agent::run(
-                config.clone(),
-                Some(prefixed_prompt),
-                None,
-                model_override,
-                config.default_temperature,
-                false,
-                None,
-                job.allowed_tools.clone(),
-            ))
-            .await
-        }
-    };
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let trace_ctx = Arc::new(crate::observability::runtime_trace::TraceContext::cron(
+        job.id.clone(),
+        job.name.clone(),
+        run_id.clone(),
+    ));
+
+    let agent_config = config.clone();
+    let agent_temperature = config.default_temperature;
+    let agent_allowed_tools = job.allowed_tools.clone();
+
+    let run_started = std::time::Instant::now();
+
+    let run_result = crate::observability::runtime_trace::RUNTIME_TRACE_CONTEXT
+        .scope(Some(trace_ctx), async move {
+            emit_cron_started(job, &prompt, model_override.as_deref(), &run_id);
+
+            let result = match job.session_target {
+                SessionTarget::Main | SessionTarget::Isolated => {
+                    Box::pin(crate::agent::run(
+                        agent_config,
+                        Some(prefixed_prompt),
+                        None,
+                        model_override,
+                        agent_temperature,
+                        false,
+                        None,
+                        agent_allowed_tools,
+                    ))
+                    .await
+                }
+            };
+
+            let duration_ms = u64::try_from(run_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            emit_cron_finished(&result, duration_ms);
+
+            result
+        })
+        .await;
 
     match run_result {
         Ok(response) => (
