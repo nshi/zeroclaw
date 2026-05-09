@@ -4789,8 +4789,8 @@ mod tests {
         let result = truncate_tool_message_content(&content, 2000);
 
         // Must remain valid JSON with tool_call_id preserved
-        let parsed: serde_json::Value =
-            serde_json::from_str(&result).expect("truncated binary tool message must remain valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&result)
+            .expect("truncated binary tool message must remain valid JSON");
         assert_eq!(
             parsed.get("tool_call_id").and_then(|v| v.as_str()),
             Some("call_binary_test"),
@@ -6681,7 +6681,11 @@ mod tests {
             .find(|msg| msg.role == "user" && msg.content.starts_with("[Tool results]"))
             .expect("tool results message should be present");
         assert!(tool_results.content.contains("hello"));
-        assert!(!tool_results.content.contains("The operation was NOT performed."));
+        assert!(
+            !tool_results
+                .content
+                .contains("The operation was NOT performed.")
+        );
     }
 
     #[tokio::test]

@@ -68,7 +68,11 @@ pub(crate) fn truncate_tool_message_content(content: &str, max_chars: usize) -> 
     }
     // Clone inner content to release the immutable borrow on `value`,
     // which we need to mutate below.
-    let Some(inner) = value.get("content").and_then(|v| v.as_str()).map(String::from) else {
+    let Some(inner) = value
+        .get("content")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+    else {
         return truncate_plain_text(content, max_chars);
     };
 

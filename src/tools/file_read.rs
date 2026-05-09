@@ -702,7 +702,10 @@ mod tests {
 
         assert!(!result.success, "PDF read without feature must fail");
         let err = result.error.unwrap();
-        assert!(err.contains("PDF file"), "error must mention PDF, got: {err}");
+        assert!(
+            err.contains("PDF file"),
+            "error must mention PDF, got: {err}"
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
