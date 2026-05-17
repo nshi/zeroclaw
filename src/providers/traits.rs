@@ -605,6 +605,26 @@ pub fn tool_specs_to_openai_json(tools: &[ToolSpec]) -> Vec<serde_json::Value> {
 
 /// Build tool instructions text for prompt-guided tool calling.
 ///
+/// Build a system prompt with the provider's `customize_prompt_builder` hook
+/// applied. Always injects `ThinkingDirectiveSection` at the front; `customize`
+/// runs between defaults and the provider hook so callers can add channel- or
+/// turn-specific sections (e.g. `MemoryContextSection`).
+///
+/// When `provider` is a `Router`, its hook resolves the model alias before
+/// delegating, so per-model directives (e.g. the gemma `<|think|>` token)
+/// see the fully resolved model id.
+pub fn build_system_prompt_with_provider(
+    provider: &dyn Provider,
+    ctx: &crate::agent::prompt::PromptContext<'_>,
+    customize: impl FnOnce(&mut crate::agent::prompt::SystemPromptBuilder),
+) -> String {
+    let mut builder = crate::agent::prompt::SystemPromptBuilder::with_defaults();
+    builder.push_front(Box::new(crate::agent::prompt::ThinkingDirectiveSection));
+    customize(&mut builder);
+    provider.customize_prompt_builder(&mut builder, ctx);
+    builder.build(ctx).unwrap_or_default()
+}
+
 /// Generates a formatted text block describing available tools and how to
 /// invoke them using XML-style tags. This is used as a fallback when the
 /// provider doesn't support native tool calling.

@@ -977,6 +977,7 @@ fn get_or_create_provider_session_id(
 
 fn refreshed_new_session_system_prompt(
     ctx: &ChannelRuntimeContext,
+    provider: &dyn Provider,
     model_name: &str,
     channel_name: &str,
     reply_target: Option<&str>,
@@ -993,15 +994,16 @@ fn refreshed_new_session_system_prompt(
         &fresh_skills,
         memory_context,
     );
-    build_channel_prompt(&prompt_ctx)
+    build_channel_prompt(provider, &prompt_ctx)
 }
 
-/// Build a system prompt for a channel message using the standard builder
-/// with `MemoryContextSection` appended.
-fn build_channel_prompt(ctx: &crate::agent::prompt::PromptContext<'_>) -> String {
-    let mut builder = crate::agent::prompt::SystemPromptBuilder::with_defaults();
-    builder.push_back(Box::new(crate::agent::prompt::MemoryContextSection));
-    builder.build(ctx).unwrap_or_default()
+fn build_channel_prompt(
+    provider: &dyn Provider,
+    ctx: &crate::agent::prompt::PromptContext<'_>,
+) -> String {
+    crate::providers::traits::build_system_prompt_with_provider(provider, ctx, |b| {
+        b.push_back(Box::new(crate::agent::prompt::MemoryContextSection));
+    })
 }
 
 fn compact_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) -> bool {
@@ -2621,10 +2623,11 @@ async fn process_channel_message(
             &ctx.skills,
             mem_ctx_ref,
         );
-        build_channel_prompt(&prompt_ctx)
+        build_channel_prompt(active_provider.as_ref(), &prompt_ctx)
     } else {
         refreshed_new_session_system_prompt(
             ctx.as_ref(),
+            active_provider.as_ref(),
             &route.model,
             &msg.channel,
             reply_target_ref,
@@ -3102,21 +3105,6 @@ async fn process_channel_message(
                 }
             }
 
-            runtime_trace::record_event(
-                "channel_message_outbound",
-                Some(msg.channel.as_str()),
-                Some(route.provider.as_str()),
-                Some(route.model.as_str()),
-                None,
-                Some(true),
-                None,
-                serde_json::json!({
-                    "sender": msg.sender,
-                    "elapsed_ms": started_at.elapsed().as_millis(),
-                    "response": scrub_credentials(&delivered_response),
-                }),
-            );
-
             // Persist intermediate tool-call/result messages from this turn
             // so the model retains concrete "I used tools" examples in
             // context, preventing drift toward tool-less responses (#4827).
@@ -3171,25 +3159,48 @@ async fn process_channel_message(
                 started_at.elapsed().as_millis(),
                 truncate_with_ellipsis(&delivered_response, 80)
             );
-            if let Some(channel) = target_channel.as_ref() {
-                if let Some(ref draft_id) = draft_message_id {
-                    if let Err(e) = channel
+            let delivery_result: anyhow::Result<()> = match target_channel.as_ref() {
+                Some(channel) => match draft_message_id.as_deref() {
+                    Some(draft_id) => channel
                         .finalize_draft(&msg.reply_target, draft_id, &delivered_response)
                         .await
-                    {
-                        tracing::warn!("Failed to finalize draft on {}: {e}", channel.name());
-                    }
-                } else if let Err(e) = channel
-                    .send(
-                        &SendMessage::new(&delivered_response, &msg.reply_target)
-                            .in_thread(msg.thread_ts.clone())
-                            .with_cancellation(cancellation_token.clone()),
-                    )
-                    .await
-                {
-                    eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
-                }
-            }
+                        .inspect_err(|e| {
+                            tracing::warn!(
+                                "Failed to finalize draft on {}: {e}",
+                                channel.name()
+                            );
+                        }),
+                    None => channel
+                        .send(
+                            &SendMessage::new(&delivered_response, &msg.reply_target)
+                                .in_thread(msg.thread_ts.clone())
+                                .with_cancellation(cancellation_token.clone()),
+                        )
+                        .await
+                        .inspect_err(|e| {
+                            tracing::warn!("Failed to reply on {}: {e}", channel.name());
+                        }),
+                },
+                // No target channel (e.g. deregistered mid-turn): treat as
+                // delivered for bookkeeping — the response is still recorded.
+                None => Ok(()),
+            };
+
+            let delivery_error = delivery_result.as_ref().err().map(|e| format!("{e:#}"));
+            runtime_trace::record_event(
+                "channel_message_outbound",
+                Some(msg.channel.as_str()),
+                Some(route.provider.as_str()),
+                Some(route.model.as_str()),
+                None,
+                Some(delivery_result.is_ok()),
+                delivery_error.as_deref(),
+                serde_json::json!({
+                    "sender": msg.sender,
+                    "elapsed_ms": started_at.elapsed().as_millis(),
+                    "response": scrub_credentials(&delivered_response),
+                }),
+            );
         }
         LlmExecutionResult::Completed(Ok(Err(e))) => {
             if crate::agent::loop_::is_tool_loop_cancelled(&e) || cancellation_token.is_cancelled()
@@ -7931,6 +7942,7 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(
             refreshed_new_session_system_prompt(
                 runtime_ctx.as_ref(),
+                &DummyProvider,
                 "test-model",
                 "telegram",
                 None,

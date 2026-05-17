@@ -201,38 +201,50 @@ impl Tool for AskUserTool {
             });
         }
 
-        // Listen for user response with timeout
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMessage>(1);
         let timeout = std::time::Duration::from_secs(timeout_secs);
+        let timeout_result = || ToolResult {
+            success: false,
+            output: "TIMEOUT".to_string(),
+            error: Some(format!(
+                "No response received within {timeout_secs} seconds"
+            )),
+        };
+        let received_result = |msg: ChannelMessage| ToolResult {
+            success: true,
+            output: msg.content,
+            error: None,
+        };
 
-        // Spawn a listener task on the channel
+        // Prefer the channel's intercept hook: it taps the supervised
+        // listener instead of starting a second concurrent long-poll
+        // (Telegram returns 409 when two getUpdates calls overlap).
+        match channel.await_next_reply(&reply_target, timeout).await {
+            crate::channels::traits::NextReply::Received(msg) => {
+                return Ok(received_result(msg));
+            }
+            crate::channels::traits::NextReply::Timeout => {
+                return Ok(timeout_result());
+            }
+            crate::channels::traits::NextReply::Unsupported => {
+                // Fall through to legacy spawn-listen path.
+            }
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMessage>(1);
         let listen_channel = Arc::clone(&channel);
         let listen_handle = tokio::spawn(async move { listen_channel.listen(tx).await });
-
         let response = tokio::time::timeout(timeout, rx.recv()).await;
-
-        // Abort the listener once we have a response or timeout
         listen_handle.abort();
 
-        match response {
-            Ok(Some(msg)) => Ok(ToolResult {
-                success: true,
-                output: msg.content,
-                error: None,
-            }),
-            Ok(None) => Ok(ToolResult {
+        Ok(match response {
+            Ok(Some(msg)) => received_result(msg),
+            Ok(None) => ToolResult {
                 success: false,
                 output: "TIMEOUT".to_string(),
                 error: Some("Channel closed before receiving a response".to_string()),
-            }),
-            Err(_) => Ok(ToolResult {
-                success: false,
-                output: "TIMEOUT".to_string(),
-                error: Some(format!(
-                    "No response received within {timeout_secs} seconds"
-                )),
-            }),
-        }
+            },
+            Err(_) => timeout_result(),
+        })
     }
 }
 

@@ -222,6 +222,33 @@ pub trait Channel: Send + Sync {
     ) -> Option<Box<dyn crate::approval::ChannelApprovalAdapter>> {
         None
     }
+
+    /// Register a one-shot intercept for the next inbound message whose
+    /// `reply_target` matches the supplied value. The intercepted message is
+    /// diverted away from the normal `listen()` pipeline so it won't be
+    /// processed as a new turn.
+    ///
+    /// Exists so tools like `ask_user` don't have to start a second
+    /// `listen()` task that contends with the supervised listener for the
+    /// platform's single in-flight long-poll slot (Telegram returns HTTP 409
+    /// when two getUpdates calls overlap).
+    async fn await_next_reply(
+        &self,
+        _reply_target: &str,
+        _timeout: std::time::Duration,
+    ) -> NextReply {
+        NextReply::Unsupported
+    }
+}
+
+/// Result of `Channel::await_next_reply`. The `Unsupported` variant lets
+/// callers fall back to spawning their own listener for channels (e.g. test
+/// stubs, CLI) that can't tap the supervised listener.
+#[derive(Debug)]
+pub enum NextReply {
+    Received(ChannelMessage),
+    Timeout,
+    Unsupported,
 }
 
 #[cfg(test)]
