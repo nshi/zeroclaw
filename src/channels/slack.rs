@@ -1,4 +1,4 @@
-use super::traits::{Channel, ChannelMessage, SendMessage};
+use super::traits::{Channel, ChannelMessage, NextReply, SendMessage};
 use anyhow::Context;
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -7,7 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::header::HeaderMap;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -53,6 +53,15 @@ pub struct SlackChannel {
     lazy_draft_ts: tokio::sync::Mutex<HashMap<String, String>>,
     /// Emoji reaction name (without colons) that cancels an in-flight request.
     cancel_reaction: Option<String>,
+    /// One-shot intercepts registered by `await_next_reply`, keyed by
+    /// `reply_target`. Checked in the listen loop before forwarding a
+    /// real user message so an awaiting tool (e.g. `ask_user`) receives
+    /// the reply instead of the supervisor pipeline processing it as a
+    /// new turn. Synthetic `/config` block-action and `/stop` cancel
+    /// sends bypass this — they're not user replies.
+    pending_intercepts: Arc<
+        Mutex<HashMap<String, tokio::sync::oneshot::Sender<ChannelMessage>>>,
+    >,
 }
 
 const SLACK_HISTORY_MAX_RETRIES: u32 = 3;
@@ -182,7 +191,21 @@ impl SlackChannel {
             last_draft_edit: Mutex::new(HashMap::new()),
             lazy_draft_ts: tokio::sync::Mutex::new(HashMap::new()),
             cancel_reaction: None,
+            pending_intercepts: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Pop a pending intercept matching `reply_target`, if any. Used by the
+    /// listen loop's user-message dispatch and by tests to exercise the
+    /// same lookup.
+    fn take_intercept(
+        &self,
+        reply_target: &str,
+    ) -> Option<tokio::sync::oneshot::Sender<ChannelMessage>> {
+        self.pending_intercepts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(reply_target)
     }
 
     /// Configure group-chat trigger policy.
@@ -2839,6 +2862,11 @@ impl SlackChannel {
                     attachments: vec![],
                 };
 
+                if let Some(sender) = self.take_intercept(&channel_msg.reply_target) {
+                    let _ = sender.send(channel_msg);
+                    continue;
+                }
+
                 // Track thread context so start_typing can set assistant status.
                 if let Some(ref tts) = channel_msg.thread_ts {
                     if let Ok(mut map) = self.active_assistant_thread.lock() {
@@ -3841,6 +3869,11 @@ impl Channel for SlackChannel {
                             attachments: vec![],
                         };
 
+                        if let Some(sender) = self.take_intercept(&channel_msg.reply_target) {
+                            let _ = sender.send(channel_msg);
+                            continue;
+                        }
+
                         if tx.send(channel_msg).await.is_err() {
                             return Ok(());
                         }
@@ -3925,10 +3958,38 @@ impl Channel for SlackChannel {
                         attachments: vec![],
                     };
 
+                    if let Some(sender) = self.take_intercept(&channel_msg.reply_target) {
+                        let _ = sender.send(channel_msg);
+                        continue;
+                    }
+
                     if tx.send(channel_msg).await.is_err() {
                         return Ok(());
                     }
                 }
+            }
+        }
+    }
+
+    async fn await_next_reply(
+        &self,
+        reply_target: &str,
+        timeout: std::time::Duration,
+    ) -> NextReply {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_intercepts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(reply_target.to_string(), tx);
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(msg)) => NextReply::Received(msg),
+            _ => {
+                self.pending_intercepts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(reply_target);
+                NextReply::Timeout
             }
         }
     }
@@ -4044,6 +4105,59 @@ mod tests {
             vec![],
         );
         assert_eq!(ch.channel_id, Some("C12345".to_string()));
+    }
+
+    #[tokio::test]
+    async fn slack_await_next_reply_times_out_without_match() {
+        let ch = SlackChannel::new("xoxb-fake".into(), None, None, vec![], vec![]);
+        let result = ch
+            .await_next_reply("C123", std::time::Duration::from_millis(50))
+            .await;
+        assert!(matches!(result, NextReply::Timeout));
+        assert!(ch.pending_intercepts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn slack_pending_intercept_matches_reply_target() {
+        let ch = Arc::new(SlackChannel::new(
+            "xoxb-fake".into(),
+            None,
+            None,
+            vec![],
+            vec![],
+        ));
+        let ch_for_send = ch.clone();
+
+        let recv_task = tokio::spawn(async move {
+            ch.await_next_reply("C42", std::time::Duration::from_secs(2))
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let sender = ch_for_send
+            .take_intercept("C42")
+            .expect("intercept missing");
+        let msg = ChannelMessage {
+            id: "slack_C42_1.000".into(),
+            sender: "alice".into(),
+            reply_target: "C42".into(),
+            content: "the answer".into(),
+            channel: "slack".into(),
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+        };
+        sender.send(msg).unwrap();
+
+        match recv_task.await.unwrap() {
+            NextReply::Received(m) => {
+                assert_eq!(m.content, "the answer");
+                assert_eq!(m.reply_target, "C42");
+            }
+            other => panic!("expected Received, got {other:?}"),
+        }
     }
 
     #[test]
