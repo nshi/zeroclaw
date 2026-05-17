@@ -1623,13 +1623,10 @@ mod tests {
         );
     }
 
-    /// End-to-end check: when an `OllamaProvider` is wrapped in the same
-    /// stack that production uses (`Router(ReliableProvider(OllamaProvider))`),
-    /// invoking `customize_prompt_builder` on the outermost wrapper with a
-    /// hint alias must still produce `<|think|>` at the start of the built
-    /// system prompt. Two prior fixes passed isolated-layer tests but
-    /// regressed on this end-to-end path because the middle wrapper
-    /// (`ReliableProvider`) silently swallowed the hook.
+    /// End-to-end: the production wrapper stack
+    /// `Router(ReliableProvider(OllamaProvider))` must inject `<|think|>`
+    /// when given a `hint:gemma` alias. Guards against future wrappers
+    /// that forget to forward `customize_prompt_builder`.
     #[test]
     fn end_to_end_router_reliable_ollama_injects_think_token_for_gemma() {
         use crate::agent::prompt::{SystemPromptBuilder, test_helpers::make_test_ctx};

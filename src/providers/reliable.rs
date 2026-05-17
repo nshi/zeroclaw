@@ -417,11 +417,14 @@ impl Provider for ReliableProvider {
         builder: &mut crate::agent::prompt::SystemPromptBuilder,
         ctx: &crate::agent::prompt::PromptContext<'_>,
     ) {
-        // Forward to the primary provider so per-model hooks (e.g. the
-        // gemma `<|think|>` token in OllamaProvider) still fire when the
-        // primary is wrapped in this resilience layer. Fallback providers
-        // are intentionally skipped — only the primary's hook applies to
-        // the system prompt built for the originating request.
+        // Fallback providers are intentionally skipped: the system prompt
+        // is built once for the originating request, so only the primary's
+        // hook applies. Per-request fallback swaps happen later in
+        // chat_with_*, not at prompt-build time.
+        debug_assert!(
+            !self.providers.is_empty(),
+            "ReliableProvider must be constructed with at least one provider"
+        );
         if let Some((_, provider)) = self.providers.first() {
             provider.customize_prompt_builder(builder, ctx);
         }

@@ -1,4 +1,4 @@
-use super::traits::{Channel, ChannelMessage, NextReply, SendMessage};
+use super::traits::{Channel, ChannelMessage, InboxInterceptor, NextReply, SendMessage};
 use crate::config::{Config, StreamMode};
 use crate::security::pairing::PairingGuard;
 use anyhow::Context;
@@ -340,19 +340,10 @@ pub struct TelegramChannel {
         Arc<std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>>,
     /// Per-channel proxy URL override.
     proxy_url: Option<String>,
-    /// One-shot intercepts registered by `await_next_reply`, keyed by
-    /// `reply_target`. The listen loop removes the matching sender (if any)
-    /// before forwarding a message to the supervisor's mpsc, so the message
-    /// is diverted to the awaiting tool instead of being processed as a new
-    /// turn.
-    pending_intercepts: Arc<
-        std::sync::Mutex<
-            std::collections::HashMap<
-                String,
-                tokio::sync::oneshot::Sender<ChannelMessage>,
-            >,
-        >,
-    >,
+    /// Diverts targeted inbound messages from the supervised listener to
+    /// awaiting tools (e.g. `ask_user`) so they aren't processed as new
+    /// turns. Shared logic lives in `traits::InboxInterceptor`.
+    interceptor: InboxInterceptor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,22 +388,8 @@ impl TelegramChannel {
             voice_chats: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_voice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             proxy_url: None,
-            pending_intercepts: Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            interceptor: InboxInterceptor::new(),
         }
-    }
-
-    /// Pop a pending intercept matching `reply_target`, if any. Shared by the
-    /// listen loop's dispatch and tests so both exercise the same lookup.
-    fn take_intercept(
-        &self,
-        reply_target: &str,
-    ) -> Option<tokio::sync::oneshot::Sender<ChannelMessage>> {
-        self.pending_intercepts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(reply_target)
     }
 
     /// Configure whether Telegram-native acknowledgement reactions are sent.
@@ -2989,7 +2966,7 @@ Ensure only one `mentat` process is using this bot token."
                         .send()
                         .await; // Ignore errors for typing indicator
 
-                    if let Some(sender) = self.take_intercept(&msg.reply_target) {
+                    if let Some(sender) = self.interceptor.take(&msg.reply_target) {
                         // Receiver-dropped error is intentionally ignored:
                         // forwarding to the main pipeline would race a
                         // just-cleared intercept and double-process.
@@ -3010,24 +2987,7 @@ Ensure only one `mentat` process is using this bot token."
         reply_target: &str,
         timeout: std::time::Duration,
     ) -> NextReply {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending_intercepts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(reply_target.to_string(), tx);
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(msg)) => NextReply::Received(msg),
-            // Timeout or sender drop without a value: clear our entry so a
-            // later message can't be swallowed by a stale intercept.
-            _ => {
-                self.pending_intercepts
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(reply_target);
-                NextReply::Timeout
-            }
-        }
+        self.interceptor.await_reply(reply_target, timeout).await
     }
 
     async fn health_check(&self) -> bool {
@@ -3153,7 +3113,7 @@ mod tests {
             .await;
         assert!(matches!(result, NextReply::Timeout));
         assert!(start.elapsed() >= std::time::Duration::from_millis(40));
-        assert!(ch.pending_intercepts.lock().unwrap().is_empty());
+        assert!(ch.interceptor.is_empty());
     }
 
     #[tokio::test]
@@ -3174,7 +3134,8 @@ mod tests {
 
         // Exercise the same lookup the listen loop uses.
         let sender = ch_for_send
-            .take_intercept("chat-42")
+            .interceptor
+            .take("chat-42")
             .expect("intercept missing");
         let msg = ChannelMessage {
             id: "intercept-1".into(),

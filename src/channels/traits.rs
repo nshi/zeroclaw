@@ -251,6 +251,94 @@ pub enum NextReply {
     Unsupported,
 }
 
+/// Shared one-shot intercept registry used by channel impls (Telegram,
+/// Slack) to divert specific inbound messages from the supervised listener
+/// to an awaiting tool (e.g. `ask_user`). Each entry consumes itself when
+/// matched; cancelled awaiters drop-clean their own entry to avoid leaks.
+#[derive(Debug, Default)]
+pub struct InboxInterceptor {
+    pending: std::sync::Mutex<
+        std::collections::HashMap<String, tokio::sync::oneshot::Sender<ChannelMessage>>,
+    >,
+}
+
+impl InboxInterceptor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pop a pending intercept matching `reply_target`. Listen-loop dispatch
+    /// calls this before forwarding a message to the main mpsc.
+    pub fn take(
+        &self,
+        reply_target: &str,
+    ) -> Option<tokio::sync::oneshot::Sender<ChannelMessage>> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(reply_target)
+    }
+
+    /// Register a one-shot intercept and wait up to `timeout` for a match.
+    /// Cleans up the entry on timeout *and* on caller cancellation (the
+    /// returned future's `Drop` removes the key) so a stale `Sender` can't
+    /// swallow a later message bound for the supervisor.
+    pub async fn await_reply(
+        &self,
+        reply_target: &str,
+        timeout: std::time::Duration,
+    ) -> NextReply {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(reply_target.to_string(), tx);
+
+        // RAII guard: removes our entry from the map if this future is
+        // dropped before completing (caller cancellation) or returns on
+        // timeout. On `Received` we leave cleanup to the listen loop's
+        // `take`, which already consumed the entry.
+        struct CleanupGuard<'a> {
+            interceptor: &'a InboxInterceptor,
+            key: &'a str,
+            armed: bool,
+        }
+        impl Drop for CleanupGuard<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    self.interceptor
+                        .pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(self.key);
+                }
+            }
+        }
+        let mut guard = CleanupGuard {
+            interceptor: self,
+            key: reply_target,
+            armed: true,
+        };
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(msg)) => {
+                guard.armed = false; // listen loop already removed the entry
+                NextReply::Received(msg)
+            }
+            _ => NextReply::Timeout, // guard's Drop removes the entry
+        }
+    }
+
+    /// Whether the registry currently holds any pending intercepts.
+    /// Test-only utility — production code shouldn't depend on this.
+    pub fn is_empty(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +373,59 @@ mod tests {
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))
         }
+    }
+
+    #[tokio::test]
+    async fn inbox_interceptor_cleans_up_on_caller_cancel() {
+        let interceptor = std::sync::Arc::new(InboxInterceptor::new());
+        let interceptor_clone = interceptor.clone();
+
+        // Spawn an awaiter then drop the handle before it resolves.
+        let handle = tokio::spawn(async move {
+            interceptor_clone
+                .await_reply("dropped", std::time::Duration::from_secs(60))
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!interceptor.is_empty(), "intercept should be registered");
+        handle.abort();
+        // Give the runtime a tick to actually run the future's Drop.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            interceptor.is_empty(),
+            "abort/cancellation must remove the orphaned intercept"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbox_interceptor_received_clears_entry() {
+        let interceptor = std::sync::Arc::new(InboxInterceptor::new());
+        let interceptor_for_send = interceptor.clone();
+
+        let awaiter = tokio::spawn(async move {
+            interceptor
+                .await_reply("k", std::time::Duration::from_secs(2))
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let sender = interceptor_for_send.take("k").expect("registered");
+        sender
+            .send(ChannelMessage {
+                id: "1".into(),
+                sender: "u".into(),
+                reply_target: "k".into(),
+                content: "hi".into(),
+                channel: "test".into(),
+                timestamp: 0,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: vec![],
+            })
+            .unwrap();
+
+        assert!(matches!(awaiter.await.unwrap(), NextReply::Received(_)));
+        assert!(interceptor_for_send.is_empty());
     }
 
     #[test]
