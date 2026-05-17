@@ -1623,6 +1623,61 @@ mod tests {
         );
     }
 
+    /// End-to-end check: when an `OllamaProvider` is wrapped in the same
+    /// stack that production uses (`Router(ReliableProvider(OllamaProvider))`),
+    /// invoking `customize_prompt_builder` on the outermost wrapper with a
+    /// hint alias must still produce `<|think|>` at the start of the built
+    /// system prompt. Two prior fixes passed isolated-layer tests but
+    /// regressed on this end-to-end path because the middle wrapper
+    /// (`ReliableProvider`) silently swallowed the hook.
+    #[test]
+    fn end_to_end_router_reliable_ollama_injects_think_token_for_gemma() {
+        use crate::agent::prompt::{SystemPromptBuilder, test_helpers::make_test_ctx};
+        use crate::providers::Provider;
+        use crate::providers::reliable::ReliableProvider;
+        use crate::providers::router::{Route, RouterProvider};
+
+        let ollama = OllamaProvider {
+            base_url: "http://localhost:11434".to_string(),
+            reasoning_enabled: Some(true),
+            timeout_secs: None,
+            max_tokens: None,
+            num_ctx: None,
+            native_tool_calling: None,
+        };
+        let reliable: Box<dyn Provider> = Box::new(ReliableProvider::new(
+            vec![("ollama".into(), Box::new(ollama) as Box<dyn Provider>)],
+            0,
+            0,
+        ));
+        let router = RouterProvider::new(
+            vec![("ollama".into(), reliable)],
+            vec![(
+                "gemma".into(),
+                Route {
+                    provider_name: "ollama".into(),
+                    model: "gemma4".into(),
+                },
+            )],
+            "gemma4".into(),
+        );
+
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let mut ctx = make_test_ctx(&tools);
+        ctx.model_name = "hint:gemma";
+
+        let mut builder = SystemPromptBuilder::with_defaults();
+        router.customize_prompt_builder(&mut builder, &ctx);
+        let prompt = builder.build(&ctx).unwrap();
+
+        assert!(
+            prompt.starts_with("<|think|>"),
+            "production wrapper stack should inject <|think|> at the front of \
+             the system prompt for gemma; got: {:?}",
+            &prompt[..prompt.len().min(80)]
+        );
+    }
+
     #[test]
     fn customize_prompt_builder_noop_for_non_gemma() {
         use crate::agent::prompt::{SystemPromptBuilder, test_helpers::make_test_ctx};
