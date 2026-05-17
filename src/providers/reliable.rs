@@ -412,6 +412,21 @@ impl Provider for ReliableProvider {
         }
     }
 
+    fn customize_prompt_builder(
+        &self,
+        builder: &mut crate::agent::prompt::SystemPromptBuilder,
+        ctx: &crate::agent::prompt::PromptContext<'_>,
+    ) {
+        // Forward to the primary provider so per-model hooks (e.g. the
+        // gemma `<|think|>` token in OllamaProvider) still fire when the
+        // primary is wrapped in this resilience layer. Fallback providers
+        // are intentionally skipped — only the primary's hook applies to
+        // the system prompt built for the originating request.
+        if let Some((_, provider)) = self.providers.first() {
+            provider.customize_prompt_builder(builder, ctx);
+        }
+    }
+
     async fn warmup(&self) -> anyhow::Result<()> {
         for (name, provider) in &self.providers {
             tracing::info!(provider = name, "Warming up provider connection pool");
@@ -1343,6 +1358,73 @@ mod tests {
     }
 
     // ── Existing tests (preserved) ──
+
+    #[test]
+    fn customize_prompt_builder_forwards_to_primary() {
+        use crate::agent::prompt::{
+            PromptContext, SystemPromptBuilder, test_helpers::make_test_ctx,
+        };
+        use std::sync::atomic::AtomicBool;
+
+        struct HookCapture {
+            called: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl Provider for HookCapture {
+            fn customize_prompt_builder(
+                &self,
+                _builder: &mut SystemPromptBuilder,
+                _ctx: &PromptContext<'_>,
+            ) {
+                self.called.store(true, Ordering::SeqCst);
+            }
+            async fn chat_with_system(
+                &self,
+                _: Option<&str>,
+                _: &str,
+                _: &str,
+                _: f64,
+            ) -> anyhow::Result<String> {
+                unreachable!()
+            }
+            async fn chat_with_history(
+                &self,
+                _: &[ChatMessage],
+                _: &str,
+                _: f64,
+            ) -> anyhow::Result<String> {
+                unreachable!()
+            }
+        }
+
+        let primary_called = Arc::new(AtomicBool::new(false));
+        let fallback_called = Arc::new(AtomicBool::new(false));
+        let reliable = ReliableProvider::new(
+            vec![
+                (
+                    "primary".into(),
+                    Box::new(HookCapture {
+                        called: Arc::clone(&primary_called),
+                    }) as Box<dyn Provider>,
+                ),
+                (
+                    "fallback".into(),
+                    Box::new(HookCapture {
+                        called: Arc::clone(&fallback_called),
+                    }) as Box<dyn Provider>,
+                ),
+            ],
+            0,
+            0,
+        );
+
+        let tools: Vec<Box<dyn crate::tools::Tool>> = vec![];
+        let ctx = make_test_ctx(&tools);
+        let mut builder = SystemPromptBuilder::new();
+        reliable.customize_prompt_builder(&mut builder, &ctx);
+        assert!(primary_called.load(Ordering::SeqCst));
+        assert!(!fallback_called.load(Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn succeeds_without_retry() {
